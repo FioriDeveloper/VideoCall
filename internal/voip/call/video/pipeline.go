@@ -50,7 +50,13 @@ type Pipeline struct {
 
 	lastOrientation int // última orientação (0..3) vista na extensão RTP do peer; -1 = nenhuma
 
+	// Recepção robusta do vídeo do peer no 1:1 (WACALLS_1A1_RX; ver rx.go).
+	rx rxState
+
 	OnFrame func(au []byte)
+	// OnKeyframeRequest é chamado (fora do mutex) quando o pipeline quer um keyframe
+	// do peer; recebe o SSRC de vídeo dele. Quem implementa envia o PLI via SRTCP.
+	OnKeyframeRequest func(mediaSSRC uint32)
 	// OnOrientation é chamado quando a ORIENTAÇÃO da câmera do peer muda (quartos de
 	// volta horários, 0..3), lida da extensão de vídeo do WhatsApp (MediaFrameInfo,
 	// bits baixos = CVO). Permite o painel girar o vídeo sozinho.
@@ -124,6 +130,7 @@ func (p *Pipeline) Setup(callID, ourDeviceJid, peerDeviceJid string, sendKM, rec
 	p.transportSeq = 0
 	p.keyframeRequired = true
 	p.lastAUAt = time.Time{}
+	p.setupRxLocked(peerSsrcs[2])
 	p.mu.Unlock()
 
 	p.relay.SetStreamSsrcs(selfSsrcs, peerSsrcs)
@@ -299,49 +306,79 @@ func (p *Pipeline) SenderStats() media.RtcpSenderStats {
 
 func (p *Pipeline) HandleRelayData(data []byte) {
 	p.mu.Lock()
-	srtp, depack, selfSsrc := p.srtp, p.depack, p.selfSsrc
-	p.mu.Unlock()
-	if srtp == nil || depack == nil {
+	if p.srtp == nil || p.depack == nil {
+		p.mu.Unlock()
 		return
 	}
-	if media.RTPSsrc(data) == selfSsrc {
+	if media.RTPSsrc(data) == p.selfSsrc {
+		p.mu.Unlock()
+		return
+	}
+	if p.rx.enabled {
+		d := p.handleRobustLocked(data, time.Now())
+		p.mu.Unlock()
+		p.dispatch(d)
 		return
 	}
 
-	pkt, err := srtp.Unprotect(data)
+	// Caminho legado (grupo): sem reordenação; depack/srtp sob o mutex.
+	pkt, err := p.srtp.Unprotect(data)
 	if err != nil {
+		p.mu.Unlock()
 		p.log.Debug("video srtp unprotect error", "err", err)
 		return
 	}
 	if len(pkt.Payload) == 0 {
+		p.mu.Unlock()
 		return
 	}
-	nalus := depack.Depacketize(pkt.Payload)
-	orient, hasOrient := parseVideoOrientation(pkt.Header)
+	var d deliveries
+	p.consumeLocked(pkt, &d)
+	p.mu.Unlock()
+	p.dispatch(d)
+}
 
+// deliveries são os efeitos colaterais colhidos sob o mutex e executados fora dele.
+type deliveries struct {
+	frames    [][]byte
+	orient    int
+	orientCb  func(int)
+	pliSsrc   uint32
+	pliNeeded bool
+}
+
+func (p *Pipeline) dispatch(d deliveries) {
+	if d.orientCb != nil {
+		d.orientCb(d.orient)
+	}
 	p.mu.Lock()
+	cb, req := p.OnFrame, p.OnKeyframeRequest
+	p.mu.Unlock()
+	if cb != nil {
+		for _, f := range d.frames {
+			cb(f)
+		}
+	}
+	if d.pliNeeded && req != nil {
+		req(d.pliSsrc)
+	}
+}
+
+// consumeLocked despacota um pacote já decifrado e, no marker, fecha o access unit.
+func (p *Pipeline) consumeLocked(pkt *media.RtpPacket, d *deliveries) {
+	nalus := p.depack.Depacketize(pkt.Payload)
+	if orient, ok := parseVideoOrientation(pkt.Header); ok && orient != p.lastOrientation {
+		p.lastOrientation = orient
+		d.orient, d.orientCb = orient, p.OnOrientation
+	}
 	for _, nalu := range nalus {
 		p.frameBuf = append(p.frameBuf, annexBStartCode...)
 		p.frameBuf = append(p.frameBuf, nalu...)
 	}
-	var frame []byte
 	if pkt.Header.Marker && len(p.frameBuf) > 0 {
-		frame = p.frameBuf
+		frame := p.frameBuf
 		p.frameBuf = nil
-	}
-	cb := p.OnFrame
-	var orientCb func(int)
-	if hasOrient && orient != p.lastOrientation {
-		p.lastOrientation = orient
-		orientCb = p.OnOrientation
-	}
-	p.mu.Unlock()
-
-	if orientCb != nil {
-		orientCb(orient)
-	}
-	if frame != nil && cb != nil {
-		cb(frame)
+		p.frameDoneLocked(frame, d)
 	}
 }
 
@@ -358,5 +395,6 @@ func (p *Pipeline) Reset() {
 	p.keyframeRequired = true
 	p.stats = media.RtcpSenderStats{}
 	p.lastOrientation = -1
+	p.resetRxLocked()
 	p.mu.Unlock()
 }
