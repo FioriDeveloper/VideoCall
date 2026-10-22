@@ -195,6 +195,14 @@ func (s *SrtcpSender) SenderReport(stats RtcpSenderStats, nowMs uint64) ([]byte,
 	return s.protectLocked(plain)
 }
 
+// ReceiverReport monta e protege um RR (PT 201) de um bloco sobre o stream do peer.
+func (s *SrtcpSender) ReceiverReport(block [24]byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	plain := BuildReceiverReport(s.ssrc, block, s.profile)
+	return s.protectLocked(plain[:])
+}
+
 // PictureLossIndication monta e protege um PLI pedindo keyframe ao emissor de mediaSSRC.
 func (s *SrtcpSender) PictureLossIndication(mediaSSRC uint32) ([]byte, error) {
 	s.mu.Lock()

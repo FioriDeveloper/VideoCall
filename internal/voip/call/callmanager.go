@@ -35,6 +35,7 @@ type CallManager struct {
 
 	rtcp       *rtcp1a1              // SRTCP do 1:1 (WACALLS_1A1_PLI / WACALLS_1A1_SRTCP); nil = desligado
 	audioStats media.RtcpSenderStats // contadores de envio do áudio (p/ Sender Report)
+	audioRx    *media.RtpRxStats     // perda/jitter do áudio do peer (p/ Receiver Report)
 
 	firstPacketSent       bool
 	initialTransportSent  bool

@@ -2,8 +2,10 @@ package media
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"testing"
+	"time"
 )
 
 // Vetores do meowcaller (rtp/testdata/kats.json).
@@ -113,5 +115,78 @@ func TestPliBytes(t *testing.T) {
 	want, _ := hex.DecodeString("81ce000211223344" + "55667788")
 	if !bytes.Equal(got[:], want) {
 		t.Fatalf("PLI = %x, want %x", got[:], want)
+	}
+}
+
+func TestBuildReceiverReportBytes(t *testing.T) {
+	var block [24]byte
+	for i := range block {
+		block[i] = byte(i + 1)
+	}
+	got := BuildReceiverReport(0xaabbccdd, block, false)
+	if hex.EncodeToString(got[:8]) != "81c90007aabbccdd" || !bytes.Equal(got[8:], block[:]) {
+		t.Fatalf("RR = %x", got[:])
+	}
+	if p := BuildReceiverReport(1, block, true); p[0] != 0x91 {
+		t.Fatalf("bit de perfil: %x", p[0])
+	}
+}
+
+func TestRtpRxStatsLossJitterDup(t *testing.T) {
+	s := NewRtpRxStats(90000)
+	t0 := time.Unix(1000, 0)
+	// seq 100..109 com 103 e 104 perdidos, 105 duplicado, chegada a cada 20ms certinho
+	for i, seq := range []uint16{100, 101, 102, 105, 105, 106, 107, 108, 109} {
+		at := t0.Add(time.Duration(i) * 20 * time.Millisecond)
+		s.Update(seq, uint32(i)*1800, at)
+	}
+	if s.Received() != 8 {
+		t.Fatalf("received=%d (duplicado deveria ser ignorado)", s.Received())
+	}
+	b, ok := s.Report(0x1234, t0.Add(time.Second))
+	if !ok {
+		t.Fatal("sem relatório")
+	}
+	if binary.BigEndian.Uint32(b[0:4]) != 0x1234 {
+		t.Fatal("ssrc")
+	}
+	if b[5] != 0 || b[6] != 0 || b[7] != 2 {
+		t.Fatalf("perdidos acumulados = %x, want 2", b[5:8])
+	}
+	if b[4] != uint8((2<<8)/10) {
+		t.Fatalf("fração = %d", b[4])
+	}
+	if binary.BigEndian.Uint32(b[8:12]) != 109 {
+		t.Fatal("ext highest seq")
+	}
+	// 2º relatório sem perda nova: fração 0
+	s.Update(110, 9*1800, t0.Add(9*20*time.Millisecond))
+	b2, _ := s.Report(0x1234, t0.Add(2*time.Second))
+	if b2[4] != 0 {
+		t.Fatalf("fração do 2º intervalo = %d", b2[4])
+	}
+}
+
+func TestRtpRxStatsWrapAndLSR(t *testing.T) {
+	s := NewRtpRxStats(16000)
+	t0 := time.Unix(0, 0)
+	s.Update(65534, 0, t0)
+	s.Update(65535, 960, t0)
+	s.Update(0, 1920, t0)
+	s.NoteSenderReport(0xdeadbeef, t0)
+	b, _ := s.Report(7, t0.Add(500*time.Millisecond))
+	if binary.BigEndian.Uint32(b[8:12]) != 1<<16 {
+		t.Fatalf("ext seq = %x", b[8:12])
+	}
+	if binary.BigEndian.Uint32(b[16:20]) != 0xdeadbeef || binary.BigEndian.Uint32(b[20:24]) != 32768 {
+		t.Fatalf("LSR/DLSR = %x", b[16:24])
+	}
+}
+
+func TestParseSenderReports(t *testing.T) {
+	sr := BuildSenderReport(0x01020304, &RtcpSenderStats{}, 1718000000000)
+	got := ParseSenderReports(sr[:])
+	if len(got) != 1 || got[0].SSRC != 0x01020304 || got[0].NtpMid != binary.BigEndian.Uint32(sr[10:14]) {
+		t.Fatalf("got %+v", got)
 	}
 }

@@ -32,6 +32,7 @@ type rxState struct {
 	ssrc        uint32 // SSRC travado (1º pacote aceito)
 
 	reorder *transport.RtpReorderer[*media.RtpPacket]
+	stats   *media.RtpRxStats // perda/jitter do vídeo do peer (p/ Receiver Report)
 	timer   *time.Timer
 	window  time.Duration
 
@@ -62,6 +63,7 @@ func (p *Pipeline) setupRxLocked(derivedPeerSsrc uint32) {
 		derivedSsrc: derivedPeerSsrc,
 		window:      w,
 		reorder:     transport.NewRtpReorderer[*media.RtpPacket](w, 512),
+		stats:       media.NewRtpRxStats(90000),
 	}
 }
 
@@ -219,7 +221,34 @@ func (p *Pipeline) flushReorder(r *transport.RtpReorderer[*media.RtpPacket]) {
 	p.dispatch(d)
 }
 
-func (p *Pipeline) noteReceptionLocked(pkt *media.RtpPacket, now time.Time) {}
+func (p *Pipeline) noteReceptionLocked(pkt *media.RtpPacket, now time.Time) {
+	if p.rx.stats != nil {
+		p.rx.stats.Update(pkt.Header.SequenceNumber, pkt.Header.Timestamp, now)
+	}
+}
+
+// RxReport devolve o SSRC do vídeo do peer e o bloco de relatório (perda/jitter) p/ o
+// Receiver Report; ok=false se ainda não chegou nada.
+func (p *Pipeline) RxReport(now time.Time) (ssrc uint32, block [24]byte, ok bool) {
+	p.mu.Lock()
+	st, ssrc := p.rx.stats, p.rx.ssrc
+	p.mu.Unlock()
+	if st == nil || ssrc == 0 {
+		return 0, block, false
+	}
+	block, ok = st.Report(ssrc, now)
+	return ssrc, block, ok
+}
+
+// NoteSenderReport registra um SR do peer (LSR/DLSR dos próximos RR).
+func (p *Pipeline) NoteSenderReport(ssrc, ntpMid uint32, at time.Time) {
+	p.mu.Lock()
+	st, mine := p.rx.stats, p.rx.ssrc
+	p.mu.Unlock()
+	if st != nil && ssrc == mine {
+		st.NoteSenderReport(ntpMid, at)
+	}
+}
 
 func envInt(name string) int {
 	n := 0

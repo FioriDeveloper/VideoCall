@@ -219,6 +219,7 @@ func (m *CallManager) handleAudioRelayData(data []byte) {
 	srtp := m.srtpSession
 	codec := m.codec
 	held := m.held
+	audioRx := m.audioRx
 	m.mu.Unlock()
 
 	pkt, err := srtp.Unprotect(data)
@@ -229,6 +230,9 @@ func (m *CallManager) handleAudioRelayData(data []byte) {
 			}
 		}
 		return
+	}
+	if audioRx != nil {
+		audioRx.Update(pkt.Header.SequenceNumber, pkt.Header.Timestamp, time.Now())
 	}
 	if len(pkt.Payload) == 0 {
 		return

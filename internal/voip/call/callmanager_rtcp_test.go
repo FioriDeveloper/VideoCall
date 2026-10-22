@@ -2,9 +2,11 @@ package call
 
 import (
 	"bytes"
+	"encoding/binary"
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	callvideo "wacalls/internal/voip/call/video"
 	"wacalls/internal/voip/core"
@@ -91,4 +93,24 @@ func TestOnRelayRtcpHandlesPeerPLIAndAdaptsTag(t *testing.T) {
 		t.Fatal("PLI deveria sair com tag de 4 bytes")
 	}
 	_ = core.PayloadTypeWhatsAppH264
+}
+
+func TestSendReceiverReportsAudio(t *testing.T) {
+	t.Setenv("WACALLS_1A1_RR", "1")
+	m, rr, callKey := newRtcpTestManager(t)
+	for i := 0; i < 5; i++ {
+		m.audioRx.Update(uint16(10+i), uint32(i)*960, time.Unix(0, 0).Add(time.Duration(i)*60*time.Millisecond))
+	}
+	m.sendReceiverReports(m.rtcp, m.audioRx, 0xfeed, time.Unix(1, 0))
+	if len(rr.sent) != 1 {
+		t.Fatalf("sent=%d", len(rr.sent))
+	}
+	ourKeys, _ := media.DeriveGroupSrtcpKeys(callKey, "a:1@s.whatsapp.net")
+	plain, _, ok := media.UnprotectSrtcpTag(&ourKeys, m.selfSsrc, rr.sent[0], 10)
+	if !ok || plain[1] != media.RtcpPtRr || len(plain) != 32 {
+		t.Fatalf("RR inválido: ok=%v %x", ok, plain)
+	}
+	if binary.BigEndian.Uint32(plain[4:8]) != m.selfSsrc || binary.BigEndian.Uint32(plain[8:12]) != 0xfeed {
+		t.Fatalf("SSRCs errados: %x", plain[:12])
+	}
 }

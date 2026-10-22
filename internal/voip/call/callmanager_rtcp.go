@@ -15,6 +15,8 @@ import (
 //	WACALLS_1A1_PLI    (padrão ligado)    pede keyframe (PLI) ao vídeo do celular;
 //	WACALLS_1A1_SRTCP  (padrão DESLIGADO) SR+SDES periódico e leitura do RTCP do celular
 //	                                      (PLI/FIR -> OnPeerKeyframeRequest);
+//	WACALLS_1A1_RR     (padrão DESLIGADO) Receiver Report (PT 201) com perda/jitter do áudio e
+//	                                      do vídeo do celular (a cada 1,5 s);
 //	WACALLS_1A1_SRTCP_TAG                 tag SRTCP em bytes (4|10, padrão 10);
 //	WACALLS_1A1_RTCP_PROFILE_BIT          bit de perfil (0x10) nos RTCP de vídeo (padrão ligado).
 //
@@ -32,6 +34,7 @@ type rtcp1a1 struct {
 	tagLen   int
 	detected bool
 	sr       bool // WACALLS_1A1_SRTCP
+	rr       bool // WACALLS_1A1_RR
 	stop     chan struct{}
 	lastReq  time.Time
 	seen     map[[2]uint8]bool // (PT, FMT) já logados
@@ -49,11 +52,13 @@ func rtcpTagLen() int {
 func (m *CallManager) setupRtcpLocked(callKey []byte, ourDeviceJid, peerDeviceJid string) {
 	pli := core.EnvFlag("WACALLS_1A1_PLI", true)
 	sr := core.EnvFlag("WACALLS_1A1_SRTCP", false)
+	rr := core.EnvFlag("WACALLS_1A1_RR", false)
 	m.stopRtcpLocked()
-	if !pli && !sr {
+	m.audioRx = media.NewRtpRxStats(16000)
+	if !pli && !sr && !rr {
 		return
 	}
-	r := &rtcp1a1{tagLen: rtcpTagLen(), sr: sr, seen: map[[2]uint8]bool{}}
+	r := &rtcp1a1{tagLen: rtcpTagLen(), sr: sr, rr: rr, seen: map[[2]uint8]bool{}}
 	profile := core.EnvFlag("WACALLS_1A1_RTCP_PROFILE_BIT", true)
 	var err error
 	if m.selfSsrc != 0 {
@@ -75,7 +80,7 @@ func (m *CallManager) setupRtcpLocked(callKey []byte, ourDeviceJid, peerDeviceJi
 		return
 	}
 	m.rtcp = r
-	m.log.Info("srtcp 1:1 pronto", "pli", pli, "sr_e_leitura", sr, "tag", r.tagLen, "profile_bit", profile)
+	m.log.Info("srtcp 1:1 pronto", "pli", pli, "sr_e_leitura", sr, "rr", rr, "tag", r.tagLen, "profile_bit", profile)
 }
 
 func (m *CallManager) rekeyRtcpRecvLocked(peerKey []byte, peerJid string) {
@@ -119,7 +124,7 @@ func (m *CallManager) RequestPeerKeyframe() { m.video.RequestKeyframe() }
 // startRtcpLoopLocked inicia o SR+SDES periódico (só com WACALLS_1A1_SRTCP).
 func (m *CallManager) startRtcpLoopLocked() {
 	r := m.rtcp
-	if r == nil || !r.sr || r.stop != nil {
+	if r == nil || !(r.sr || r.rr) || r.stop != nil {
 		return
 	}
 	stop := make(chan struct{})
@@ -141,7 +146,15 @@ func (m *CallManager) startRtcpLoopLocked() {
 func (m *CallManager) sendSenderReports(r *rtcp1a1, nowMs uint64) {
 	m.mu.Lock()
 	astats := m.audioStats
+	arx := m.audioRx
+	peerAudio := m.subscribedSsrcForLog()
 	m.mu.Unlock()
+	if r.rr {
+		m.sendReceiverReports(r, arx, peerAudio, time.UnixMilli(int64(nowMs)))
+	}
+	if !r.sr {
+		return
+	}
 	if r.audio != nil && astats.PacketsSent > 0 {
 		if pkt, err := r.audio.SenderReport(astats, nowMs); err == nil {
 			m.relay.Broadcast(pkt)
@@ -150,6 +163,25 @@ func (m *CallManager) sendSenderReports(r *rtcp1a1, nowMs uint64) {
 	if r.video != nil {
 		if vs := m.video.SenderStats(); vs.PacketsSent > 0 {
 			if pkt, err := r.video.SenderReport(vs, nowMs); err == nil {
+				m.relay.Broadcast(pkt)
+			}
+		}
+	}
+}
+
+// sendReceiverReports manda um RR por stream do celular (áudio e vídeo), cada um com o
+// SSRC do nosso stream correspondente como remetente.
+func (m *CallManager) sendReceiverReports(r *rtcp1a1, arx *media.RtpRxStats, peerAudio uint32, now time.Time) {
+	if r.audio != nil && arx != nil && peerAudio != 0 {
+		if b, ok := arx.Report(peerAudio, now); ok {
+			if pkt, err := r.audio.ReceiverReport(b); err == nil {
+				m.relay.Broadcast(pkt)
+			}
+		}
+	}
+	if r.video != nil {
+		if _, b, ok := m.video.RxReport(now); ok {
+			if pkt, err := r.video.ReceiverReport(b); err == nil {
 				m.relay.Broadcast(pkt)
 			}
 		}
@@ -200,6 +232,16 @@ func (m *CallManager) onRelayRtcp(data []byte) {
 		m.log.Info("srtcp 1:1: RTCP do celular autenticado", "tag", tag, "ssrc", ssrc)
 	}
 	m.logRtcpKinds(r, plain)
+	for _, sr := range media.ParseSenderReports(plain) {
+		now := time.Now()
+		m.video.NoteSenderReport(sr.SSRC, sr.NtpMid, now)
+		m.mu.Lock()
+		arx, pa := m.audioRx, m.subscribedSsrcForLog()
+		m.mu.Unlock()
+		if arx != nil && sr.SSRC == pa {
+			arx.NoteSenderReport(sr.NtpMid, now)
+		}
+	}
 	if vs := m.video.SelfSsrc(); vs != 0 && media.RtcpRequestsKeyframe(plain, vs) {
 		r.mu.Lock()
 		fire := time.Since(r.lastReq) >= 300*time.Millisecond
