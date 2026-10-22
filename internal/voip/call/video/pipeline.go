@@ -263,6 +263,11 @@ func (p *Pipeline) FeedCaptured(au []byte) {
 		return
 	}
 	if buf := p.relay.BufferedAmount(); buf > congestionDropBytes {
+		// Os deltas depois de um quadro descartado não decodificam: o próximo a
+		// sair tem de ser IDR (o navegador manda um a cada 15 quadros, ou no pedido).
+		p.mu.Lock()
+		p.keyframeRequired = true
+		p.mu.Unlock()
 		p.txDiag(func(t *txStats) {
 			t.congest++
 			if idr {

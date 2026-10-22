@@ -292,7 +292,9 @@ func (m *CallManager) onRelayRtcp(data []byte) {
 	}
 	if vs := m.video.SelfSsrc(); vs != 0 && media.RtcpRequestsKeyframe(plain, vs) {
 		r.mu.Lock()
-		fire := time.Since(r.lastReq) >= 300*time.Millisecond
+		// O celular repete o PLI a cada ~425 ms enquanto não decodifica: repassar
+		// todos virava ~2,3 IDR/s num caminho de 50 kbps e enchia a fila do relay.
+		fire := time.Since(r.lastReq) >= time.Second
 		if fire {
 			r.lastReq = time.Now()
 		}
