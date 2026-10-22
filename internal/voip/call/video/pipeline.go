@@ -3,6 +3,7 @@ package video
 import (
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"wacalls/internal/voip/core"
@@ -50,7 +51,15 @@ type Pipeline struct {
 
 	lastOrientation int // última orientação (0..3) vista na extensão RTP do peer; -1 = nenhuma
 
+	// Recepção robusta e SRTCP do 1:1 (nil em grupo/desligado). Ver rx.go e rtcp.go.
+	rx     atomic.Pointer[rxState]
+	rtcp   atomic.Pointer[rtcpState]
+	legacy sync.Mutex // serializa depack/frameBuf/srtp no caminho antigo (grupo e RX desligado)
+
 	OnFrame func(au []byte)
+	// OnKeyframeRequest é chamado quando o peer pede um keyframe do NOSSO vídeo
+	// (PLI/FIR autenticado, só 1:1 com WACALLS_1A1_SRTCP).
+	OnKeyframeRequest func()
 	// OnOrientation é chamado quando a ORIENTAÇÃO da câmera do peer muda (quartos de
 	// volta horários, 0..3), lida da extensão de vídeo do WhatsApp (MediaFrameInfo,
 	// bits baixos = CVO). Permite o painel girar o vídeo sozinho.
@@ -125,6 +134,12 @@ func (p *Pipeline) Setup(callID, ourDeviceJid, peerDeviceJid string, sendKM, rec
 	p.keyframeRequired = true
 	p.lastAUAt = time.Time{}
 	p.mu.Unlock()
+
+	var nrx *rxState
+	if envBool(envRx, true) {
+		nrx = newRxState(media.GenerateSecureSsrc(callID, peerDeviceJid, slotWord))
+	}
+	p.stopRx(p.rx.Swap(nrx))
 
 	p.relay.SetStreamSsrcs(selfSsrcs, peerSsrcs)
 	p.log.Debug("video media set up", "self_video_ssrc", selfSsrc,
@@ -298,6 +313,19 @@ func (p *Pipeline) SenderStats() media.RtcpSenderStats {
 }
 
 func (p *Pipeline) HandleRelayData(data []byte) {
+	if len(data) < 12 {
+		return
+	}
+	if rx := p.rx.Load(); rx != nil {
+		p.handleRobust(rx, data)
+		return
+	}
+	p.handleLegacy(data)
+}
+
+// handleLegacy é o caminho original (grupo, ou WACALLS_1A1_RX=0), agora com o
+// srtp/depack serializados: antes rodavam fora de qualquer lock.
+func (p *Pipeline) handleLegacy(data []byte) {
 	p.mu.Lock()
 	srtp, depack, selfSsrc := p.srtp, p.depack, p.selfSsrc
 	p.mu.Unlock()
@@ -308,15 +336,19 @@ func (p *Pipeline) HandleRelayData(data []byte) {
 		return
 	}
 
+	p.legacy.Lock()
 	pkt, err := srtp.Unprotect(data)
 	if err != nil {
+		p.legacy.Unlock()
 		p.log.Debug("video srtp unprotect error", "err", err)
 		return
 	}
 	if len(pkt.Payload) == 0 {
+		p.legacy.Unlock()
 		return
 	}
 	nalus := depack.Depacketize(pkt.Payload)
+	p.legacy.Unlock()
 	orient, hasOrient := parseVideoOrientation(pkt.Header)
 
 	p.mu.Lock()
@@ -346,6 +378,10 @@ func (p *Pipeline) HandleRelayData(data []byte) {
 }
 
 func (p *Pipeline) Reset() {
+	p.stopRx(p.rx.Swap(nil))
+	if rs := p.rtcp.Swap(nil); rs != nil {
+		rs.stopOnce.Do(func() { close(rs.stop) })
+	}
 	p.mu.Lock()
 	p.rtp = nil
 	p.srtp = nil

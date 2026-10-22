@@ -124,6 +124,18 @@ func (b *reorderBuffer[T]) skip(out []T, lost int) ([]T, int) {
 	return b.drain(out, lost)
 }
 
+// seen diz se seq já foi entregue, pulado ou está retido (duplicado/atrasado).
+func (b *reorderBuffer[T]) seen(seq uint16) bool {
+	if !b.started {
+		return false
+	}
+	if seqDelta(b.next, seq) < 0 {
+		return true
+	}
+	_, ok := b.held[seq]
+	return ok
+}
+
 func (b *reorderBuffer[T]) reset() {
 	b.started = false
 	b.held = map[uint16]heldItem[T]{}
