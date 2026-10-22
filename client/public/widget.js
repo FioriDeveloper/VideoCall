@@ -678,11 +678,26 @@
   function setupVideoChannel(pc) {
     if (!videoSupported()) return NO_VIDEO;
     try {
-      var receiver = createVideoReceiver();
-      var dc = pc.createDataChannel(VIDEO.LABEL, { ordered: false, maxRetransmits: 0 });
+      var dc = null, sender = null, pending = null, open = false, lastPli = 0;
+      // Decoder precisa de keyframe: pede ao contato (texto JSON no canal; o servidor
+      // converte em PLI). Limitado a 1 a cada 500 ms.
+      var receiver = createVideoReceiver(function () {
+        var n = Date.now();
+        if (dc && dc.readyState === "open" && n - lastPli > 500) {
+          lastPli = n;
+          try { dc.send('{"type":"pli"}'); } catch (e) {}
+        }
+      });
+      dc = pc.createDataChannel(VIDEO.LABEL, { ordered: false, maxRetransmits: 0 });
       dc.binaryType = "arraybuffer";
-      dc.onmessage = function (e) { receiver.decode(e.data); };
-      var sender = null, pending = null, open = false;
+      dc.onmessage = function (e) {
+        // texto = controle do servidor ({"type":"keyframe_request"}); binário = access unit
+        if (typeof e.data === "string") {
+          try { if (JSON.parse(e.data).type === "keyframe_request" && sender) sender.forceKeyframe(); } catch (err) {}
+          return;
+        }
+        receiver.decode(e.data);
+      };
       function startNow(track) {
         if (sender) sender.close();
         sender = createVideoSender(track, function (au) { if (dc.readyState === "open") dc.send(au); });

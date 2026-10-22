@@ -582,6 +582,11 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		}
 		_ = ac.bridge.WriteVideo(au)
 	}
+	cm.OnKeyframeRequest = func() {
+		if ac, ok := s.reg.get(callID); ok && ac.bridge != nil {
+			_ = ac.bridge.WriteVideoControl(`{"type":"keyframe_request"}`)
+		}
+	}
 	cm.OnVideoUpgradeRequest = func(c *call.CallInfo) {
 		s.mgr.broker.emitVideoState(s.id, c.CallID, "upgrade-request", c.StateData.PeerVideoOn,
 			!c.StateData.VideoOff, c.StateData.VideoUpgradeIncoming, c.StateData.VideoUpgradeOutgoing,

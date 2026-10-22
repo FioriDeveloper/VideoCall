@@ -39,9 +39,30 @@ const buildVideoChannel = (pc: RTCPeerConnection): VideoChannel => {
     maxRetransmits: 0,
   });
   videoDc.binaryType = "arraybuffer";
-  videoDc.onmessage = (e: MessageEvent<ArrayBuffer>) => receiver.decode(e.data);
-
   let sender: VideoSender | null = null;
+
+  // Decoder precisa de keyframe: pede ao contato (texto JSON no canal; o servidor
+  // converte em PLI). Limitado a 1 a cada 500 ms.
+  let lastPli = 0;
+  receiver.onNeedKeyframe = () => {
+    const now = Date.now();
+    if (videoDc.readyState !== "open" || now - lastPli < 500) return;
+    lastPli = now;
+    try {
+      videoDc.send('{"type":"pli"}');
+    } catch {}
+  };
+  videoDc.onmessage = (e: MessageEvent<ArrayBuffer | string>) => {
+    // texto = controle do servidor ({"type":"keyframe_request"}); binário = access unit
+    if (typeof e.data === "string") {
+      try {
+        if (JSON.parse(e.data).type === "keyframe_request") sender?.forceKeyframe();
+      } catch {}
+      return;
+    }
+    receiver.decode(e.data);
+  };
+
   let pending: MediaStreamTrack | null = null;
   let open = false;
 

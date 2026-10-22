@@ -13,3 +13,9 @@ func (m *CallManager) VideoBufferedAmount() uint64 {
 	}
 	return m.relay.BufferedAmount()
 }
+
+// RequestPeerKeyframe pede ao peer um keyframe do vídeo dele (PLI no 1:1). Usado
+// quando o decoder do navegador precisa de um IDR para (re)começar.
+func (m *CallManager) RequestPeerKeyframe() {
+	m.video.RequestKeyframe()
+}

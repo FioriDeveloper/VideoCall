@@ -63,6 +63,9 @@ type CallManager struct {
 	OnEnded       func(*CallInfo)
 	OnPeerAudio   func([]float32)
 	OnPeerVideo   func([]byte)
+	// OnKeyframeRequest: o peer pediu um keyframe do NOSSO vídeo (PLI/FIR, só com
+	// WACALLS_1A1_SRTCP); quem consome força um IDR na câmera do navegador.
+	OnKeyframeRequest func()
 
 	OnVideoUpgradeRequest func(*CallInfo) // o peer pediu um upgrade p/ vídeo
 	OnVideoStateChanged   func(*CallInfo) // qualquer mudança no estado de vídeo
@@ -91,6 +94,11 @@ func NewCallManager(sock core.VoipSocket, log *slog.Logger) *CallManager {
 		}
 	}
 	m.video.OnOrientation = func(o int) { m.notePeerVideoOrientation(o) }
+	m.video.OnKeyframeRequest = func() {
+		if cb := m.OnKeyframeRequest; cb != nil {
+			cb()
+		}
+	}
 	return m
 }
 

@@ -179,6 +179,8 @@ func (m *CallManager) onRelayData(data []byte) {
 		m.handleAudioRelayData(data)
 	case core.PayloadTypeWhatsAppH264:
 		m.video.HandleRelayData(data)
+	case 72, 73, 74, 75, 76, 77, 78: // RTCP (PT 200-206 com o bit de marker): SR/RR/SDES/.../RTPFB/PSFB
+		m.video.HandleRelayRtcp(data)
 	}
 }
 

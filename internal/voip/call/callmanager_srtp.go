@@ -67,6 +67,11 @@ func (m *CallManager) initSrtpKeysLocked() {
 		m.mediaClock = media.NewMediaClock()
 	}
 	m.video.SetClock(m.mediaClock)
+	// SRTCP do 1:1 (PLI ao peer; SR/RR/leitura atrás de WACALLS_1A1_*). Falha aqui não
+	// derruba a chamada: só fica sem pedido de keyframe.
+	if err := m.video.SetupRtcp(call.EncryptionKey, ourDeviceJid, peerDeviceJid); err != nil {
+		m.log.Warn("video SRTCP setup failed", "err", err)
+	}
 }
 
 func (m *CallManager) reinitSrtpLocked(peerKey []byte, peerJid types.JID) {
