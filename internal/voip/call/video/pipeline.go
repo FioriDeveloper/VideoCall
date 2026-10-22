@@ -297,6 +297,13 @@ func (p *Pipeline) FeedCaptured(au []byte) {
 	p.mu.Unlock()
 }
 
+// SelfSsrc devolve o SSRC do nosso stream de vídeo (0 antes do Setup).
+func (p *Pipeline) SelfSsrc() uint32 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.selfSsrc
+}
+
 // SenderStats devolve os contadores de envio (pacotes/octetos/último timestamp RTP).
 func (p *Pipeline) SenderStats() media.RtcpSenderStats {
 	p.mu.Lock()

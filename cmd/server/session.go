@@ -582,6 +582,13 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		}
 		_ = ac.bridge.WriteVideo(au)
 	}
+	// O celular pediu keyframe do nosso vídeo (só com WACALLS_1A1_SRTCP): avisa o
+	// navegador por texto no canal h264 (o cliente força um IDR).
+	cm.OnPeerKeyframeRequest = func() {
+		if ac, ok := s.reg.get(callID); ok && ac.bridge != nil {
+			_ = ac.bridge.WriteVideoControl(`{"type":"keyframe_request"}`)
+		}
+	}
 	cm.OnVideoUpgradeRequest = func(c *call.CallInfo) {
 		s.mgr.broker.emitVideoState(s.id, c.CallID, "upgrade-request", c.StateData.PeerVideoOn,
 			!c.StateData.VideoOff, c.StateData.VideoUpgradeIncoming, c.StateData.VideoUpgradeOutgoing,

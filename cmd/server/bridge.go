@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net"
 	"os"
@@ -70,6 +71,9 @@ type Bridge struct {
 	OnBrowserRTP func(payload []byte)
 	// OnBrowserVideo is invoked with H264 access units captured from the browser camera.
 	OnBrowserVideo func(au []byte)
+	// OnBrowserKeyframeRequest: o navegador pediu keyframe do vídeo do contato por
+	// mensagem de TEXTO JSON {"type":"pli"} no canal h264.
+	OnBrowserKeyframeRequest func()
 	// OnTerminalICE fires when the peer connection fails or closes.
 	OnTerminalICE func()
 	// terminateDisabled silencia o OnTerminalICE. Usado ao TROCAR a ponte (ex.:
@@ -127,6 +131,15 @@ func NewBridge(offerSDP string, log *slog.Logger) (*Bridge, string, error) {
 		}
 		br.videoDC.Store(dc)
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			// Texto = controle JSON; o formato binário (1 AU Annex B por mensagem) segue igual.
+			if msg.IsString {
+				if isBrowserPliMessage(msg.Data) {
+					if cb := br.OnBrowserKeyframeRequest; cb != nil {
+						cb()
+					}
+				}
+				return
+			}
 			if cb := br.OnBrowserVideo; cb != nil && len(msg.Data) > 0 {
 				cb(msg.Data)
 			}
@@ -178,6 +191,24 @@ func (b *Bridge) WriteVideo(au []byte) error {
 		return nil
 	}
 	return dc.Send(au)
+}
+
+// isBrowserPliMessage diz se a mensagem de texto do canal h264 é {"type":"pli"}.
+func isBrowserPliMessage(data []byte) bool {
+	var m struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(data, &m) == nil && m.Type == "pli"
+}
+
+// WriteVideoControl manda uma mensagem de controle JSON (texto) pelo canal h264, p.ex.
+// {"type":"keyframe_request"} (o celular pediu keyframe da câmera do atendente).
+func (b *Bridge) WriteVideoControl(msg string) error {
+	dc := b.videoDC.Load()
+	if dc == nil {
+		return nil
+	}
+	return dc.SendText(msg)
 }
 
 func (b *Bridge) Close() {

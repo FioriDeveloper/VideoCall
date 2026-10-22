@@ -87,3 +87,31 @@ func TestPliRoundTripDetected(t *testing.T) {
 		t.Fatal("SR+SDES must unprotect and not look like a keyframe request")
 	}
 }
+
+func TestSrtcpConfigurableTagLen(t *testing.T) {
+	epoch := make([]byte, 32)
+	keys, _ := DeriveGroupSrtcpKeys(epoch, "1:0@s.whatsapp.net")
+	pli := BuildPictureLossIndication(0x11223344, 0x55667788, false)
+	for _, tag := range []int{4, 10} {
+		prot, err := ProtectSrtcpTag(&keys, 0x11223344, 7, pli[:], tag)
+		if err != nil || len(prot) != len(pli)+4+tag {
+			t.Fatalf("tag %d: len=%d err=%v", tag, len(prot), err)
+		}
+		plain, idx, ok := UnprotectSrtcpTag(&keys, 0x11223344, prot, tag)
+		if !ok || idx != 7 || !bytes.Equal(plain, pli[:]) {
+			t.Fatalf("tag %d: roundtrip falhou", tag)
+		}
+		other := 14 - tag
+		if _, _, ok := UnprotectSrtcpTag(&keys, 0x11223344, prot, other); ok {
+			t.Fatalf("tag %d aceito como %d", tag, other)
+		}
+	}
+}
+
+func TestPliBytes(t *testing.T) {
+	got := BuildPictureLossIndication(0x11223344, 0x55667788, false)
+	want, _ := hex.DecodeString("81ce000211223344" + "55667788")
+	if !bytes.Equal(got[:], want) {
+		t.Fatalf("PLI = %x, want %x", got[:], want)
+	}
+}

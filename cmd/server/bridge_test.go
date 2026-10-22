@@ -61,3 +61,17 @@ func TestNewBridgeNegotiatesBrowserOffer(t *testing.T) {
 	}
 	t.Logf("bridge negotiated OK; answer has %d m-lines", strings.Count(answer, "m=audio"))
 }
+
+func TestIsBrowserPliMessage(t *testing.T) {
+	for in, want := range map[string]bool{
+		`{"type":"pli"}`:       true,
+		`{"type":"other"}`:     false,
+		`not json`:             false,
+		`{"type":"pli","x":1}`: true,
+		``:                     false,
+	} {
+		if got := isBrowserPliMessage([]byte(in)); got != want {
+			t.Errorf("%q: got %v want %v", in, got, want)
+		}
+	}
+}

@@ -84,6 +84,9 @@ func (m *CallManager) sendOpusFrameLocked(opus []byte) {
 		pkt.Header.ExtensionData = nil
 	}
 	m.firstPacketSent = true
+	m.audioStats.PacketsSent++
+	m.audioStats.OctetsSent += uint32(len(opus))
+	m.audioStats.RtpTimestamp = pkt.Header.Timestamp
 
 	srtp, err := m.srtpSession.Protect(pkt)
 	if err != nil {
@@ -161,6 +164,10 @@ func (m *CallManager) onRelayData(data []byte) {
 		return
 	}
 	if len(data) < 12 {
+		return
+	}
+	if media.IsRtcpPacket(data) {
+		m.onRelayRtcp(data)
 		return
 	}
 	pt := data[1] & 0x7f

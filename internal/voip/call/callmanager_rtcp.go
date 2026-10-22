@@ -1,0 +1,235 @@
+package call
+
+import (
+	"os"
+	"strconv"
+	"sync"
+	"time"
+
+	"wacalls/internal/voip/core"
+	"wacalls/internal/voip/media"
+)
+
+// SRTCP no 1:1 (item 1 e 3 do plano de qualidade de vídeo; ver QUALIDADE-VIDEO-1A1.md).
+//
+//	WACALLS_1A1_PLI    (padrão ligado)    pede keyframe (PLI) ao vídeo do celular;
+//	WACALLS_1A1_SRTCP  (padrão DESLIGADO) SR+SDES periódico e leitura do RTCP do celular
+//	                                      (PLI/FIR -> OnPeerKeyframeRequest);
+//	WACALLS_1A1_SRTCP_TAG                 tag SRTCP em bytes (4|10, padrão 10);
+//	WACALLS_1A1_RTCP_PROFILE_BIT          bit de perfil (0x10) nos RTCP de vídeo (padrão ligado).
+//
+// Fato: chaves SRTCP derivam da chave da chamada com a mesma fórmula do SRTP 1:1 e rótulos
+// 3/4/5 (mesma do grupo). Suposição NÃO validada: tag de 10 bytes e bit de perfil no vídeo
+// (valores do grupo/meowcaller). Na recepção testamos 10 e 4 e adotamos o que autenticar.
+
+const rtcpInterval = 1500 * time.Millisecond
+
+type rtcp1a1 struct {
+	mu       sync.Mutex
+	audio    *media.SrtcpSender
+	video    *media.SrtcpSender
+	recvKeys media.SrtcpKeys
+	tagLen   int
+	detected bool
+	sr       bool // WACALLS_1A1_SRTCP
+	stop     chan struct{}
+	lastReq  time.Time
+	seen     map[[2]uint8]bool // (PT, FMT) já logados
+	rxN      int
+}
+
+func rtcpTagLen() int {
+	if n, err := strconv.Atoi(os.Getenv("WACALLS_1A1_SRTCP_TAG")); err == nil && (n == 4 || n == 10) {
+		return n
+	}
+	return media.SrtcpAuthTagLen
+}
+
+// setupRtcpLocked prepara o SRTCP da chamada (m.mu travado).
+func (m *CallManager) setupRtcpLocked(callKey []byte, ourDeviceJid, peerDeviceJid string) {
+	pli := core.EnvFlag("WACALLS_1A1_PLI", true)
+	sr := core.EnvFlag("WACALLS_1A1_SRTCP", false)
+	m.stopRtcpLocked()
+	if !pli && !sr {
+		return
+	}
+	r := &rtcp1a1{tagLen: rtcpTagLen(), sr: sr, seen: map[[2]uint8]bool{}}
+	profile := core.EnvFlag("WACALLS_1A1_RTCP_PROFILE_BIT", true)
+	var err error
+	if m.selfSsrc != 0 {
+		if r.audio, err = media.NewSrtcpSender(callKey, ourDeviceJid, m.selfSsrc, false); err != nil {
+			m.log.Warn("srtcp 1:1: emissor de áudio falhou", "err", err)
+			return
+		}
+		r.audio.SetTagLen(r.tagLen)
+	}
+	if vs := m.video.SelfSsrc(); vs != 0 {
+		if r.video, err = media.NewSrtcpSender(callKey, ourDeviceJid, vs, profile); err != nil {
+			m.log.Warn("srtcp 1:1: emissor de vídeo falhou", "err", err)
+			return
+		}
+		r.video.SetTagLen(r.tagLen)
+	}
+	if r.recvKeys, err = media.DeriveGroupSrtcpKeys(callKey, peerDeviceJid); err != nil {
+		m.log.Warn("srtcp 1:1: chaves de recepção falharam", "err", err)
+		return
+	}
+	m.rtcp = r
+	m.log.Info("srtcp 1:1 pronto", "pli", pli, "sr_e_leitura", sr, "tag", r.tagLen, "profile_bit", profile)
+}
+
+func (m *CallManager) rekeyRtcpRecvLocked(peerKey []byte, peerJid string) {
+	if m.rtcp == nil {
+		return
+	}
+	if k, err := media.DeriveGroupSrtcpKeys(peerKey, ensureDeviceJid(peerJid)); err == nil {
+		m.rtcp.mu.Lock()
+		m.rtcp.recvKeys = k
+		m.rtcp.mu.Unlock()
+	}
+}
+
+func (m *CallManager) stopRtcpLocked() {
+	if m.rtcp != nil && m.rtcp.stop != nil {
+		close(m.rtcp.stop)
+		m.rtcp.stop = nil
+	}
+	m.rtcp = nil
+}
+
+// sendPeerPLI manda um PLI SRTCP pedindo keyframe ao vídeo do celular (ssrc dele).
+func (m *CallManager) sendPeerPLI(mediaSSRC uint32) {
+	m.mu.Lock()
+	r := m.rtcp
+	m.mu.Unlock()
+	if r == nil || r.video == nil {
+		return
+	}
+	pkt, err := r.video.PictureLossIndication(mediaSSRC)
+	if err != nil {
+		return
+	}
+	m.relay.Broadcast(pkt)
+	m.log.Info("video 1:1: PLI enviado ao celular", "media_ssrc", mediaSSRC)
+}
+
+// RequestPeerKeyframe pede keyframe ao celular a pedido do navegador ({"type":"pli"}).
+func (m *CallManager) RequestPeerKeyframe() { m.video.RequestKeyframe() }
+
+// startRtcpLoopLocked inicia o SR+SDES periódico (só com WACALLS_1A1_SRTCP).
+func (m *CallManager) startRtcpLoopLocked() {
+	r := m.rtcp
+	if r == nil || !r.sr || r.stop != nil {
+		return
+	}
+	stop := make(chan struct{})
+	r.stop = stop
+	go func() {
+		t := time.NewTicker(rtcpInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case now := <-t.C:
+				m.sendSenderReports(r, uint64(now.UnixMilli()))
+			}
+		}
+	}()
+}
+
+func (m *CallManager) sendSenderReports(r *rtcp1a1, nowMs uint64) {
+	m.mu.Lock()
+	astats := m.audioStats
+	m.mu.Unlock()
+	if r.audio != nil && astats.PacketsSent > 0 {
+		if pkt, err := r.audio.SenderReport(astats, nowMs); err == nil {
+			m.relay.Broadcast(pkt)
+		}
+	}
+	if r.video != nil {
+		if vs := m.video.SenderStats(); vs.PacketsSent > 0 {
+			if pkt, err := r.video.SenderReport(vs, nowMs); err == nil {
+				m.relay.Broadcast(pkt)
+			}
+		}
+	}
+}
+
+// onRelayRtcp autentica o RTCP do celular e trata PLI/FIR do nosso vídeo.
+func (m *CallManager) onRelayRtcp(data []byte) {
+	m.mu.Lock()
+	r := m.rtcp
+	m.mu.Unlock()
+	if r == nil || !r.sr {
+		return
+	}
+	ssrc, ok := media.ParseRtcpSenderSsrc(data)
+	if !ok {
+		return
+	}
+	r.mu.Lock()
+	keys, tag, detected := r.recvKeys, r.tagLen, r.detected
+	r.mu.Unlock()
+	cur, other := tag, 14-tag
+	plain, _, ok := media.UnprotectSrtcpTag(&keys, ssrc, data, tag)
+	if !ok {
+		if plain, _, ok = media.UnprotectSrtcpTag(&keys, ssrc, data, other); ok {
+			tag = other
+		}
+	}
+	if !ok {
+		r.mu.Lock()
+		r.rxN++
+		n := r.rxN
+		r.mu.Unlock()
+		if n == 1 || n%200 == 0 {
+			m.log.Info("srtcp 1:1: RTCP do celular não autenticou (tag/chaves/SSRC?)", "ssrc", ssrc, "bytes", len(data), "n", n)
+		}
+		return
+	}
+	if !detected || tag != cur {
+		r.mu.Lock()
+		r.detected, r.tagLen = true, tag
+		r.mu.Unlock()
+		for _, s := range []*media.SrtcpSender{r.audio, r.video} {
+			if s != nil {
+				s.SetTagLen(tag)
+			}
+		}
+		m.log.Info("srtcp 1:1: RTCP do celular autenticado", "tag", tag, "ssrc", ssrc)
+	}
+	m.logRtcpKinds(r, plain)
+	if vs := m.video.SelfSsrc(); vs != 0 && media.RtcpRequestsKeyframe(plain, vs) {
+		r.mu.Lock()
+		fire := time.Since(r.lastReq) >= 300*time.Millisecond
+		if fire {
+			r.lastReq = time.Now()
+		}
+		r.mu.Unlock()
+		if fire && m.OnPeerKeyframeRequest != nil {
+			m.log.Info("video 1:1: celular pediu keyframe do nosso vídeo (PLI/FIR)")
+			m.OnPeerKeyframeRequest()
+		}
+	}
+}
+
+// logRtcpKinds loga (uma vez) cada combinação (PT, FMT) recebida do celular: é a
+// evidência de que feedback de banda o WhatsApp usa de fato (RR, REMB, transport-cc...).
+func (m *CallManager) logRtcpKinds(r *rtcp1a1, plain []byte) {
+	for off := 0; off+4 <= len(plain); {
+		l := (int(plain[off+2])<<8 | int(plain[off+3]) + 1) * 4
+		if l < 4 || off+l > len(plain) {
+			return
+		}
+		key := [2]uint8{plain[off+1], plain[off] & 0x1f}
+		r.mu.Lock()
+		first := !r.seen[key]
+		r.seen[key] = true
+		r.mu.Unlock()
+		if first {
+			m.log.Info("srtcp 1:1: tipo de RTCP do celular", "pt", key[0], "fmt_ou_rc", key[1], "bytes", l)
+		}
+		off += l
+	}
+}
