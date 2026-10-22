@@ -211,5 +211,12 @@ func (s *SrtcpSender) PictureLossIndication(mediaSSRC uint32) ([]byte, error) {
 	return s.protectLocked(plain[:])
 }
 
+// Remb monta e protege um REMB (sem o bit de perfil, como o do celular).
+func (s *SrtcpSender) Remb(bitrate uint64, ssrcs []uint32) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.protectLocked(BuildRemb(s.ssrc, bitrate, ssrcs))
+}
+
 // Keying devolve as chaves (p/ testes).
 func (s *SrtcpSender) Keying() SrtcpKeys { return s.keys }

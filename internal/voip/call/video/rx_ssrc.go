@@ -185,6 +185,13 @@ func (p *Pipeline) candSummaryLocked() string {
 	return b.String()
 }
 
+// PeerSsrc devolve o SSRC de vídeo do peer travado (0 = nenhum ainda).
+func (p *Pipeline) PeerSsrc() uint32 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.rx.ssrc
+}
+
 func sinceMs(t time.Time) int64 {
 	if t.IsZero() {
 		return -1

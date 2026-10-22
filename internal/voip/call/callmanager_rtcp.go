@@ -13,8 +13,15 @@ import (
 // SRTCP no 1:1 (item 1 e 3 do plano de qualidade de vídeo; ver QUALIDADE-VIDEO-1A1.md).
 //
 //	WACALLS_1A1_PLI    (padrão ligado)    pede keyframe (PLI) ao vídeo do celular;
-//	WACALLS_1A1_SRTCP  (padrão DESLIGADO) SR+SDES periódico e leitura do RTCP do celular
-//	                                      (PLI/FIR -> OnPeerKeyframeRequest);
+//	WACALLS_1A1_SRTCP  (padrão DESLIGADO) leitura do RTCP do celular (PLI/FIR ->
+//	                                      OnPeerKeyframeRequest; REMB dele no log);
+//	WACALLS_1A1_SR_SEND (padrão DESLIGADO) SR+SDES periódico nosso. Separado da leitura:
+//	                                      com ele ligado o contato deixou de ver a
+//	                                      câmera do atendente (teste de 22/10/2026);
+//	WACALLS_1A1_REMB   (padrão DESLIGADO) REMB (PT 206 FMT 15) a cada 1,5 s dizendo ao
+//	                                      celular quanto ele pode mandar (WACALLS_1A1_REMB_BPS,
+//	                                      padrão 500000). O celular manda REMB; sem o nosso,
+//	                                      o vídeo dele desce a ~25 kbps e 4 quadros/s;
 //	WACALLS_1A1_RR     (padrão DESLIGADO) Receiver Report (PT 201) com perda/jitter do áudio e
 //	                                      do vídeo do celular (a cada 1,5 s);
 //	WACALLS_1A1_SRTCP_TAG                 tag SRTCP em bytes (4|10, padrão 10);
@@ -33,8 +40,12 @@ type rtcp1a1 struct {
 	recvKeys media.SrtcpKeys
 	tagLen   int
 	detected bool
-	sr       bool // WACALLS_1A1_SRTCP
-	rr       bool // WACALLS_1A1_RR
+	sr       bool   // WACALLS_1A1_SRTCP (leitura)
+	srSend   bool   // WACALLS_1A1_SR_SEND
+	rr       bool   // WACALLS_1A1_RR
+	remb     uint64 // WACALLS_1A1_REMB: bps anunciados (0 = desligado)
+	rembLog  time.Time
+	rembSeen uint64
 	stop     chan struct{}
 	lastReq  time.Time
 	seen     map[[2]uint8]bool // (PT, FMT) já logados
@@ -53,12 +64,20 @@ func (m *CallManager) setupRtcpLocked(callKey []byte, ourDeviceJid, peerDeviceJi
 	pli := core.EnvFlag("WACALLS_1A1_PLI", true)
 	sr := core.EnvFlag("WACALLS_1A1_SRTCP", false)
 	rr := core.EnvFlag("WACALLS_1A1_RR", false)
+	srSend := core.EnvFlag("WACALLS_1A1_SR_SEND", false)
+	var remb uint64
+	if core.EnvFlag("WACALLS_1A1_REMB", false) {
+		remb = 500_000
+		if n, err := strconv.ParseUint(os.Getenv("WACALLS_1A1_REMB_BPS"), 10, 64); err == nil && n >= 30_000 {
+			remb = n
+		}
+	}
 	m.stopRtcpLocked()
 	m.audioRx = media.NewRtpRxStats(16000)
-	if !pli && !sr && !rr {
+	if !pli && !sr && !rr && !srSend && remb == 0 {
 		return
 	}
-	r := &rtcp1a1{tagLen: rtcpTagLen(), sr: sr, rr: rr, seen: map[[2]uint8]bool{}}
+	r := &rtcp1a1{tagLen: rtcpTagLen(), sr: sr, srSend: srSend, rr: rr, remb: remb, seen: map[[2]uint8]bool{}}
 	profile := core.EnvFlag("WACALLS_1A1_RTCP_PROFILE_BIT", true)
 	var err error
 	if m.selfSsrc != 0 {
@@ -80,7 +99,7 @@ func (m *CallManager) setupRtcpLocked(callKey []byte, ourDeviceJid, peerDeviceJi
 		return
 	}
 	m.rtcp = r
-	m.log.Info("srtcp 1:1 pronto", "pli", pli, "sr_e_leitura", sr, "rr", rr, "tag", r.tagLen, "profile_bit", profile)
+	m.log.Info("srtcp 1:1 pronto", "pli", pli, "leitura", sr, "sr", srSend, "rr", rr, "remb_bps", remb, "tag", r.tagLen, "profile_bit", profile)
 }
 
 func (m *CallManager) rekeyRtcpRecvLocked(peerKey []byte, peerJid string) {
@@ -124,7 +143,7 @@ func (m *CallManager) RequestPeerKeyframe() { m.video.RequestKeyframe() }
 // startRtcpLoopLocked inicia o SR+SDES periódico (só com WACALLS_1A1_SRTCP).
 func (m *CallManager) startRtcpLoopLocked() {
 	r := m.rtcp
-	if r == nil || !(r.sr || r.rr) || r.stop != nil {
+	if r == nil || !(r.srSend || r.rr || r.remb > 0) || r.stop != nil {
 		return
 	}
 	stop := make(chan struct{})
@@ -152,7 +171,21 @@ func (m *CallManager) sendSenderReports(r *rtcp1a1, nowMs uint64) {
 	if r.rr {
 		m.sendReceiverReports(r, arx, peerAudio, time.UnixMilli(int64(nowMs)))
 	}
-	if !r.sr {
+	if r.remb > 0 && r.video != nil {
+		var ssrcs []uint32
+		if vs := m.video.PeerSsrc(); vs != 0 {
+			ssrcs = append(ssrcs, vs)
+		}
+		if peerAudio != 0 {
+			ssrcs = append(ssrcs, peerAudio)
+		}
+		if len(ssrcs) > 0 {
+			if pkt, err := r.video.Remb(r.remb, ssrcs); err == nil {
+				m.relay.Broadcast(pkt)
+			}
+		}
+	}
+	if !r.srSend {
 		return
 	}
 	if r.audio != nil && astats.PacketsSent > 0 {
@@ -232,6 +265,20 @@ func (m *CallManager) onRelayRtcp(data []byte) {
 		m.log.Info("srtcp 1:1: RTCP do celular autenticado", "tag", tag, "ssrc", ssrc)
 	}
 	m.logRtcpKinds(r, plain)
+	for _, rb := range media.ParseRembs(plain) {
+		r.mu.Lock()
+		prev := r.rembSeen
+		logIt := time.Since(r.rembLog) >= 10*time.Second || prev == 0 ||
+			rb.Bitrate*4 < prev*3 || rb.Bitrate*3 > prev*4
+		if logIt {
+			r.rembLog, r.rembSeen = time.Now(), rb.Bitrate
+		}
+		r.mu.Unlock()
+		if logIt {
+			m.log.Info("srtcp 1:1: REMB do celular (banda que ele estima para o nosso envio)",
+				"bps", rb.Bitrate, "ssrcs", rb.Ssrcs, "sender", rb.Sender)
+		}
+	}
 	for _, sr := range media.ParseSenderReports(plain) {
 		now := time.Now()
 		m.video.NoteSenderReport(sr.SSRC, sr.NtpMid, now)
