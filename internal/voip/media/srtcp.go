@@ -79,6 +79,13 @@ func srtcpIV(keys *SrtcpKeys, ssrc uint32, index uint32) []byte {
 // ProtectSrtcp cifra e autentica um pacote RTCP (cabeçalho de 8 bytes em claro, corpo
 // cifrado, E-bit|index de 4 bytes e tag HMAC-SHA1 de 10 bytes).
 func ProtectSrtcp(keys *SrtcpKeys, senderSsrc, index uint32, rtcp []byte) ([]byte, error) {
+	return ProtectSrtcpTag(keys, senderSsrc, index, rtcp, SrtcpAuthTagLen)
+}
+
+// ProtectSrtcpTag é o ProtectSrtcp com o tamanho do tag de autenticação explícito
+// (1..20). No grupo o tag é de 10 bytes; no 1:1 o tamanho NÃO está confirmado (o SRTP
+// 1:1 usa 4), por isso o tamanho é parâmetro.
+func ProtectSrtcpTag(keys *SrtcpKeys, senderSsrc, index uint32, rtcp []byte, tagLen int) ([]byte, error) {
 	split := len(rtcp)
 	if split > rtcpHeaderLen {
 		split = rtcpHeaderLen
@@ -92,19 +99,24 @@ func ProtectSrtcp(keys *SrtcpKeys, senderSsrc, index uint32, rtcp []byte) ([]byt
 	out = binary.BigEndian.AppendUint32(out, 0x80000000|index)
 	mac := hmac.New(sha1.New, keys.AuthKey[:])
 	_, _ = mac.Write(out)
-	out = append(out, mac.Sum(nil)[:SrtcpAuthTagLen]...)
+	out = append(out, mac.Sum(nil)[:tagLen]...)
 	return out, nil
 }
 
 // UnprotectSrtcp autentica e decifra um pacote SRTCP. Devolve o RTCP em claro e o índice.
 func UnprotectSrtcp(keys *SrtcpKeys, senderSsrc uint32, packet []byte) ([]byte, uint32, bool) {
-	if len(packet) < rtcpHeaderLen+SrtcpTrailerLen {
+	return UnprotectSrtcpTag(keys, senderSsrc, packet, SrtcpAuthTagLen)
+}
+
+// UnprotectSrtcpTag é o UnprotectSrtcp com o tamanho do tag explícito (ver ProtectSrtcpTag).
+func UnprotectSrtcpTag(keys *SrtcpKeys, senderSsrc uint32, packet []byte, tagLen int) ([]byte, uint32, bool) {
+	if tagLen < 1 || tagLen > sha1.Size || len(packet) < rtcpHeaderLen+4+tagLen {
 		return nil, 0, false
 	}
-	tagStart := len(packet) - SrtcpAuthTagLen
+	tagStart := len(packet) - tagLen
 	mac := hmac.New(sha1.New, keys.AuthKey[:])
 	_, _ = mac.Write(packet[:tagStart])
-	if !hmac.Equal(packet[tagStart:], mac.Sum(nil)[:SrtcpAuthTagLen]) {
+	if !hmac.Equal(packet[tagStart:], mac.Sum(nil)[:tagLen]) {
 		return nil, 0, false
 	}
 	indexStart := tagStart - 4
@@ -127,6 +139,7 @@ type SrtcpSender struct {
 	cname   [WhatsappRtcpCnameLen]byte
 	profile bool
 	index   uint32
+	tagLen  int
 }
 
 // NewSrtcpSender cria o emissor do stream ssrc com chaves do (epoch, selfID).
@@ -138,7 +151,7 @@ func NewSrtcpSender(epochKey []byte, selfID string, ssrc uint32, profile bool) (
 	}
 	var entropy [12]byte
 	_, _ = rand.Read(entropy[:])
-	return &SrtcpSender{keys: keys, ssrc: ssrc, cname: BuildWhatsappRtcpCname(entropy), profile: profile, index: 1}, nil
+	return &SrtcpSender{keys: keys, ssrc: ssrc, cname: BuildWhatsappRtcpCname(entropy), profile: profile, index: 1, tagLen: SrtcpAuthTagLen}, nil
 }
 
 // Rekey troca as chaves pro epoch novo mantendo índice e CNAME (rotação de epoch).
@@ -153,6 +166,27 @@ func (s *SrtcpSender) Rekey(epochKey []byte, selfID string) error {
 	return nil
 }
 
+// SetAuthTagLen ajusta o tamanho do tag SRTCP emitido (padrão 10; o 1:1 pode usar 4).
+func (s *SrtcpSender) SetAuthTagLen(n int) {
+	if n < 1 || n > sha1.Size {
+		return
+	}
+	s.mu.Lock()
+	s.tagLen = n
+	s.mu.Unlock()
+}
+
+// Protect cifra e autentica um RTCP composto já montado em claro, consumindo um índice.
+func (s *SrtcpSender) Protect(plain []byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	packet, err := ProtectSrtcpTag(&s.keys, s.ssrc, s.index, plain, s.tagLen)
+	if err == nil {
+		s.index++
+	}
+	return packet, err
+}
+
 // SSRC devolve o SSRC do stream que este emissor representa.
 func (s *SrtcpSender) SSRC() uint32 { return s.ssrc }
 
@@ -161,7 +195,7 @@ func (s *SrtcpSender) SenderReport(stats RtcpSenderStats, nowMs uint64) ([]byte,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	plain := BuildSenderReportWithSdes(s.ssrc, &stats, nowMs, &s.cname, s.profile)
-	packet, err := ProtectSrtcp(&s.keys, s.ssrc, s.index, plain)
+	packet, err := ProtectSrtcpTag(&s.keys, s.ssrc, s.index, plain, s.tagLen)
 	if err == nil {
 		s.index++
 	}
@@ -173,7 +207,7 @@ func (s *SrtcpSender) PictureLossIndication(mediaSSRC uint32) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	plain := BuildPictureLossIndication(s.ssrc, mediaSSRC, s.profile)
-	packet, err := ProtectSrtcp(&s.keys, s.ssrc, s.index, plain[:])
+	packet, err := ProtectSrtcpTag(&s.keys, s.ssrc, s.index, plain[:], s.tagLen)
 	if err == nil {
 		s.index++
 	}
