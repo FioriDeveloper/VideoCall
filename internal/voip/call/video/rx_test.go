@@ -143,3 +143,36 @@ func TestRxFiltersForeignSSRCAndPLIBeforeFirstIDR(t *testing.T) {
 		t.Fatal("SSRC estranho deveria ser descartado")
 	}
 }
+
+func TestRxRelocksWhenLockedSsrcGoesSilent(t *testing.T) {
+	old := ssrcSilenceRelock
+	ssrcSilenceRelock = 20 * time.Millisecond
+	defer func() { ssrcSilenceRelock = old }()
+
+	h := newRxHarness(t, 77)
+	h.feed(h.au(5, 300)...)
+	time.Sleep(15 * time.Millisecond)
+	if h.nFrames() != 1 {
+		t.Fatalf("1º IDR do SSRC 77: frames=%d", h.nFrames())
+	}
+
+	// Outro fluxo começa enquanto o 77 ainda fala: descartado.
+	other := &rxHarness{t: t, tx: h.tx, rtp: media.NewH264Session(88)}
+	h.feed(other.au(5, 300)...)
+	time.Sleep(15 * time.Millisecond)
+	if h.nFrames() != 1 || h.p.rx.Foreign == 0 {
+		t.Fatalf("fluxo 88 com 77 ativo devia ser descartado: frames=%d foreign=%d", h.nFrames(), h.p.rx.Foreign)
+	}
+
+	// O 77 fica mudo: o 88 assume (espera IDR e então entrega).
+	time.Sleep(30 * time.Millisecond)
+	h.feed(other.au(1, 200)...) // delta: retrava, mas não entrega (espera IDR)
+	h.feed(other.au(5, 300)...)
+	time.Sleep(15 * time.Millisecond)
+	if h.p.rx.ssrc != 88 || h.p.rx.Relocks != 1 {
+		t.Fatalf("devia retravar no 88: ssrc=%d relocks=%d", h.p.rx.ssrc, h.p.rx.Relocks)
+	}
+	if h.nFrames() != 2 {
+		t.Fatalf("IDR do 88 devia ser entregue (e o delta antes dele não): frames=%d", h.nFrames())
+	}
+}

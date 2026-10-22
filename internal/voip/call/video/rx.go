@@ -22,7 +22,14 @@ const (
 	defaultReorderWindow = 40 * time.Millisecond
 	pliInterval          = time.Second
 	pliMinGap            = 300 * time.Millisecond
+	rxDiagInterval       = 5 * time.Second
 )
+
+// ssrcSilenceRelock: o SSRC travado ficou mudo por este tempo enquanto outro
+// chega, então o celular trocou de fluxo (ex.: ao atender, ou ao mudar de
+// camada) e a recepção retrava no novo. Com poucos quadros/s, pausas de ~300 ms
+// são normais. Variável para os testes.
+var ssrcSilenceRelock = time.Second
 
 type rxState struct {
 	enabled bool
@@ -41,6 +48,15 @@ type rxState struct {
 	skipToMarker bool // após lacuna: descartar até o fim do AU em curso
 
 	lastPLI time.Time
+
+	lastLocked time.Time // último pacote do SSRC travado
+	lastDiag   time.Time
+
+	// contadores (diagnóstico, logados a cada rxDiagInterval)
+	Pkts    uint64
+	Foreign uint64 // pacotes de outro SSRC descartados
+	Relocks uint64
+	Frames  uint64
 
 	// contadores (diagnóstico)
 	Dropped uint64 // quadros descartados por lacuna/espera de IDR
@@ -77,8 +93,13 @@ func (p *Pipeline) resetRxLocked() {
 // handleRobustLocked: filtra por SSRC, decifra, reordena e consome em ordem.
 func (p *Pipeline) handleRobustLocked(data []byte, now time.Time) (d deliveries) {
 	ssrc := media.RTPSsrc(data)
+	p.diagLocked(now)
 	if p.rx.ssrc != 0 && ssrc != p.rx.ssrc {
-		return
+		if now.Sub(p.rx.lastLocked) < ssrcSilenceRelock {
+			p.rx.Foreign++
+			return
+		}
+		p.relockLocked(ssrc)
 	}
 	pkt, err := p.srtp.Unprotect(data)
 	if err != nil {
@@ -93,6 +114,8 @@ func (p *Pipeline) handleRobustLocked(data []byte, now time.Time) (d deliveries)
 		p.log.Info("video 1:1: SSRC do peer travado", "ssrc", ssrc, "derivado", p.rx.derivedSsrc,
 			"bate", ssrc == p.rx.derivedSsrc)
 	}
+	p.rx.lastLocked = now
+	p.rx.Pkts++
 	p.noteReceptionLocked(pkt, now)
 	for _, o := range p.rx.reorder.Push(pkt.Header.SequenceNumber, pkt, now) {
 		p.consumeOrderedLocked(o, &d)
@@ -137,7 +160,42 @@ func (p *Pipeline) frameDoneLocked(frame []byte, d *deliveries) {
 			p.rx.gotIDR = true
 		}
 	}
+	p.rx.Frames++
 	d.frames = append(d.frames, frame)
+}
+
+// relockLocked troca o SSRC travado: descarta o estado do fluxo antigo e espera
+// um IDR do novo (o PLI sai para o novo SSRC).
+func (p *Pipeline) relockLocked(ssrc uint32) {
+	p.log.Info("video 1:1: SSRC do peer mudou; retravando", "de", p.rx.ssrc, "para", ssrc)
+	if p.rx.timer != nil {
+		p.rx.timer.Stop()
+		p.rx.timer = nil
+	}
+	p.rx.reorder = transport.NewRtpReorderer[*media.RtpPacket](p.rx.window, 512)
+	p.rx.stats = media.NewRtpRxStats(90000)
+	p.depack.Reset()
+	p.frameBuf = nil
+	p.rx.ssrc = 0 // o próximo pacote decifrado trava
+	p.rx.waitIDR = true
+	p.rx.skipToMarker = false
+	p.rx.lastPLI = time.Time{}
+	p.rx.Relocks++
+}
+
+// diagLocked registra os contadores da recepção a cada rxDiagInterval.
+func (p *Pipeline) diagLocked(now time.Time) {
+	if p.rx.lastDiag.IsZero() {
+		p.rx.lastDiag = now
+		return
+	}
+	if now.Sub(p.rx.lastDiag) < rxDiagInterval {
+		return
+	}
+	p.rx.lastDiag = now
+	p.log.Info("video 1:1: recepção", "ssrc", p.rx.ssrc, "pacotes", p.rx.Pkts, "quadros", p.rx.Frames,
+		"lacunas", p.rx.Gaps, "descartados", p.rx.Dropped, "outro_ssrc", p.rx.Foreign,
+		"retravas", p.rx.Relocks, "esperando_idr", p.rx.waitIDR)
 }
 
 func annexBHasIDR(au []byte) bool {
