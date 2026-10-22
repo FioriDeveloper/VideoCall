@@ -7,6 +7,8 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
+	"sync"
+
 	"wacalls/internal/voip/core"
 )
 
@@ -26,14 +28,28 @@ type SrtpError struct {
 
 func (e *SrtpError) Error() string { return fmt.Sprintf("srtp %s: %s", e.Type, e.Msg) }
 
+// rocState é o estado de ROC/sequência de UM stream (RFC 3711 §3.3.1).
+type rocState struct {
+	roc         uint32
+	lastSeq     uint16
+	initialized bool
+}
+
+// maxRecvStreams limita os streams lembrados na recepção (lixo/SSRC aleatório).
+const maxRecvStreams = 64
+
 type SrtpContext struct {
 	sessionKey  []byte
 	sessionSalt []byte
 	authKey     []byte
-	roc         uint32
-	lastSeq     uint16
-	initialized bool
+	rocState    // envio (um SSRC só)
 	authTagLen  int
+
+	// Recepção: ROC por SSRC. Com um estado só, pacotes de outro SSRC (outro
+	// aparelho do contato, outro fluxo, vários participantes) mexiam no ROC do
+	// stream certo e, conforme as sequências, tudo passava a decifrar lixo.
+	recvMu  sync.Mutex
+	recvRoc map[uint32]*rocState
 }
 
 func NewSrtpContext(keying core.SrtpKeyingMaterial, authTagLen int) (*SrtpContext, error) {
@@ -70,6 +86,15 @@ func (c *SrtpContext) WithKeying(keying core.SrtpKeyingMaterial) (*SrtpContext, 
 		return nil, err
 	}
 	n.roc, n.lastSeq, n.initialized = c.roc, c.lastSeq, c.initialized
+	c.recvMu.Lock()
+	if len(c.recvRoc) > 0 {
+		n.recvRoc = make(map[uint32]*rocState, len(c.recvRoc))
+		for ssrc, st := range c.recvRoc {
+			cp := *st
+			n.recvRoc[ssrc] = &cp
+		}
+	}
+	c.recvMu.Unlock()
 	return n, nil
 }
 
@@ -122,7 +147,7 @@ func (c *SrtpContext) Unprotect(data []byte) (*RtpPacket, error) {
 		return nil, &SrtpError{SrtpErrPacketTooShort, fmt.Sprintf("no payload: %dB total, %dB header, auth=%d", len(data), headerSize, c.authTagLen)}
 	}
 
-	roc := c.updateRoc(header.SequenceNumber)
+	roc := c.recvRocFor(header.Ssrc, header.SequenceNumber)
 	index := (uint64(roc) << 16) | uint64(header.SequenceNumber)
 
 	iv := c.generateIV(header.Ssrc, index)
@@ -139,25 +164,42 @@ func (c *SrtpContext) Unprotect(data []byte) (*RtpPacket, error) {
 // sequência (seq 0 chegando antes do 65535, ou o contrário) usam o ROC certo e não
 // mexem no estado — antes, o 65535 atrasado fazia o ROC subir duas vezes e todo o
 // resto do stream decifrava lixo (o datachannel do relay é não ordenado).
-func (c *SrtpContext) updateRoc(seq uint16) uint32 {
-	if !c.initialized {
-		c.lastSeq = seq
-		c.initialized = true
-		return c.roc
+func (c *SrtpContext) updateRoc(seq uint16) uint32 { return c.rocState.update(seq) }
+
+// recvRocFor estima o ROC do pacote recebido no estado do SSRC dele.
+func (c *SrtpContext) recvRocFor(ssrc uint32, seq uint16) uint32 {
+	c.recvMu.Lock()
+	defer c.recvMu.Unlock()
+	st := c.recvRoc[ssrc]
+	if st == nil {
+		if c.recvRoc == nil || len(c.recvRoc) >= maxRecvStreams {
+			c.recvRoc = map[uint32]*rocState{}
+		}
+		st = &rocState{}
+		c.recvRoc[ssrc] = st
 	}
-	roc := c.roc
-	if c.lastSeq < 0x8000 {
-		if seq > c.lastSeq && seq-c.lastSeq > 0x8000 && roc > 0 {
+	return st.update(seq)
+}
+
+func (st *rocState) update(seq uint16) uint32 {
+	if !st.initialized {
+		st.lastSeq = seq
+		st.initialized = true
+		return st.roc
+	}
+	roc := st.roc
+	if st.lastSeq < 0x8000 {
+		if seq > st.lastSeq && seq-st.lastSeq > 0x8000 && roc > 0 {
 			return roc - 1 // pacote atrasado da volta anterior
 		}
-	} else if c.lastSeq-0x8000 > seq {
+	} else if st.lastSeq-0x8000 > seq {
 		// virou a sequência: este pacote já é da volta seguinte
-		c.roc++
-		c.lastSeq = seq
-		return c.roc
+		st.roc++
+		st.lastSeq = seq
+		return st.roc
 	}
-	if seq > c.lastSeq {
-		c.lastSeq = seq
+	if seq > st.lastSeq {
+		st.lastSeq = seq
 	}
 	return roc
 }

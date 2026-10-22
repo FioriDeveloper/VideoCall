@@ -2,6 +2,7 @@ package video
 
 import (
 	"bytes"
+	"math/rand"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +37,7 @@ func newRxHarness(t *testing.T, ssrc uint32) *rxHarness {
 	p.rx = rxState{
 		enabled: true, pli: true, window: 5 * time.Millisecond,
 		reorder: transport.NewRtpReorderer[*media.RtpPacket](5*time.Millisecond, 512),
+		cands:   map[uint32]*ssrcCand{}, idrWait: defaultIDRWait,
 	}
 	p.OnFrame = func(au []byte) { h.mu.Lock(); h.frames = append(h.frames, au); h.mu.Unlock() }
 	p.OnKeyframeRequest = func(s uint32) { h.mu.Lock(); h.plis = append(h.plis, s); h.mu.Unlock() }
@@ -151,28 +153,144 @@ func TestRxRelocksWhenLockedSsrcGoesSilent(t *testing.T) {
 
 	h := newRxHarness(t, 77)
 	h.feed(h.au(5, 300)...)
-	time.Sleep(15 * time.Millisecond)
 	if h.nFrames() != 1 {
 		t.Fatalf("1º IDR do SSRC 77: frames=%d", h.nFrames())
 	}
 
-	// Outro fluxo começa enquanto o 77 ainda fala: descartado.
+	// Outro fluxo começa enquanto o 77 ainda fala: descartado (mas guardado).
 	other := &rxHarness{t: t, tx: h.tx, rtp: media.NewH264Session(88)}
 	h.feed(other.au(5, 300)...)
-	time.Sleep(15 * time.Millisecond)
 	if h.nFrames() != 1 || h.p.rx.Foreign == 0 {
 		t.Fatalf("fluxo 88 com 77 ativo devia ser descartado: frames=%d foreign=%d", h.nFrames(), h.p.rx.Foreign)
 	}
 
-	// O 77 fica mudo: o 88 assume (espera IDR e então entrega).
+	// O 77 fica mudo: quando o 88 ganha nota (5 pacotes), assume; os guardados
+	// (o IDR dele inclusive) entram em ordem.
 	time.Sleep(30 * time.Millisecond)
-	h.feed(other.au(1, 200)...) // delta: retrava, mas não entrega (espera IDR)
-	h.feed(other.au(5, 300)...)
-	time.Sleep(15 * time.Millisecond)
+	for i := 0; i < 4; i++ {
+		h.feed(other.au(1, 200)...)
+	}
 	if h.p.rx.ssrc != 88 || h.p.rx.Relocks != 1 {
 		t.Fatalf("devia retravar no 88: ssrc=%d relocks=%d", h.p.rx.ssrc, h.p.rx.Relocks)
 	}
-	if h.nFrames() != 2 {
-		t.Fatalf("IDR do 88 devia ser entregue (e o delta antes dele não): frames=%d", h.nFrames())
+	if h.nFrames() != 6 {
+		t.Fatalf("IDR guardado + 4 P do 88 deviam ser entregues: frames=%d", h.nFrames())
 	}
+}
+
+func TestRxGarbageStreamLockedFirstIsReplaced(t *testing.T) {
+	h := newRxHarness(t, 77)
+	// Fluxo de outro aparelho: mesma sessão RTP, chave diferente -> decifra lixo.
+	km := core.SrtpKeyingMaterial{MasterKey: bytes.Repeat([]byte{7}, 16), MasterSalt: bytes.Repeat([]byte{3}, 14)}
+	gtx, _ := media.NewSrtpSession(km, km, 4, 4)
+	g := &rxHarness{t: t, tx: gtx, rtp: media.NewH264Session(55)}
+	// Força o pior caso: o lixo trava primeiro.
+	h.p.mu.Lock()
+	h.p.rx.ssrc = 55
+	h.p.rx.cands[55] = &ssrcCand{n: 1, hist: 1}
+	h.p.rx.lastLocked = time.Now()
+	h.p.mu.Unlock()
+	for i := 0; i < 12; i++ {
+		h.feed(g.au(1, 200)...)
+		h.feed(h.au(1, 200)...)
+	}
+	h.feed(h.au(5, 300)...)
+	if h.p.rx.ssrc != 77 {
+		t.Fatalf("o fluxo bom devia assumir: ssrc=%d fluxos=%s", h.p.rx.ssrc, h.p.candSummaryLocked())
+	}
+	if good, _ := h.countFrames(); good == 0 {
+		t.Fatal("nenhum quadro do fluxo bom entregue")
+	}
+}
+
+func TestRxGivesUpWaitingForIDR(t *testing.T) {
+	h := newRxHarness(t, 77)
+	h.p.rx.idrWait = 30 * time.Millisecond
+	h.feed(h.au(5, 300)...)
+	p1 := h.au(1, 2500)
+	h.feed(p1[0], p1[2], p1[3]) // lacuna
+	time.Sleep(15 * time.Millisecond)
+	h.feed(h.au(1, 200)...)
+	n := h.nFrames()
+	if n != 1 {
+		t.Fatalf("logo após a lacuna os P deviam esperar o IDR: frames=%d", n)
+	}
+	time.Sleep(40 * time.Millisecond)
+	h.feed(h.au(1, 200)...)
+	if h.nFrames() != 2 || h.p.rx.GaveUp != 1 {
+		t.Fatalf("passada a espera, o P devia ser entregue: frames=%d desistiu=%d", h.nFrames(), h.p.rx.GaveUp)
+	}
+}
+
+// Chamada simulada: 5 quadros/s, IDR a cada 6, cada pacote chega pelos 2 relays
+// com atraso aleatório (até 90 ms) e 3% de perda por cópia, mais um fluxo de lixo
+// de outro aparelho no começo. Entregas concorrentes (rode com -race).
+func TestRxSimulatedCall(t *testing.T) {
+	h := newRxHarness(t, 77)
+	h.p.mu.Lock()
+	h.p.rx.window = defaultReorderWindow
+	h.p.rx.reorder = transport.NewRtpReorderer[*media.RtpPacket](defaultReorderWindow, 512)
+	h.p.mu.Unlock()
+	km := core.SrtpKeyingMaterial{MasterKey: bytes.Repeat([]byte{9}, 16), MasterSalt: bytes.Repeat([]byte{1}, 14)}
+	gtx, _ := media.NewSrtpSession(km, km, 4, 4)
+	g := &rxHarness{t: t, tx: gtx, rtp: media.NewH264Session(55)}
+
+	rng := rand.New(rand.NewSource(42))
+	var wg sync.WaitGroup
+	send := func(b []byte, at time.Duration) {
+		wg.Add(1)
+		time.AfterFunc(at, func() { defer wg.Done(); h.p.HandleRelayData(b) })
+	}
+	const nFrames = 12
+	for i := 0; i < 5; i++ { // lixo antes e durante o começo
+		for _, b := range g.au(1, 300) {
+			send(b, time.Duration(i*40)*time.Millisecond)
+		}
+	}
+	for f := 0; f < nFrames; f++ {
+		typ := byte(1)
+		if f%6 == 0 {
+			typ = 5
+		}
+		base := time.Duration(f*200) * time.Millisecond
+		for _, b := range h.au(typ, 1500+rng.Intn(2500)) {
+			for copy := 0; copy < 2; copy++ {
+				if rng.Float64() < 0.03 {
+					continue
+				}
+				send(b, base+time.Duration(rng.Intn(90))*time.Millisecond)
+			}
+		}
+	}
+	wg.Wait()
+	time.Sleep(100 * time.Millisecond) // timers de flush
+	h.p.mu.Lock()
+	ssrc, sum, gaps := h.p.rx.ssrc, h.p.candSummaryLocked(), h.p.rx.Gaps
+	h.p.mu.Unlock()
+	if ssrc != 77 {
+		t.Fatalf("travou no fluxo errado: %d (%s)", ssrc, sum)
+	}
+	good, bad := h.countFrames()
+	t.Logf("quadros bons %d/%d, lixo %d, lacunas %d, fluxos %s", good, nFrames, bad, gaps, sum)
+	if good < nFrames-3 {
+		t.Fatalf("entregou poucos quadros: %d de %d", good, nFrames)
+	}
+	if bad > 2 {
+		t.Fatalf("entregou %d quadros de lixo", bad)
+	}
+}
+
+// countFrames separa os quadros do fluxo bom (conteúdo 1, 2, 3... gerado por au)
+// dos de lixo.
+func (h *rxHarness) countFrames() (good, bad int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, f := range h.frames {
+		if len(f) > 6 && f[5] == 1 && f[6] == 2 {
+			good++
+		} else {
+			bad++
+		}
+	}
+	return
 }
