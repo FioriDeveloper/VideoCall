@@ -49,6 +49,11 @@ type Pipeline struct {
 	txMu sync.Mutex // só o diagnóstico do envio (txDiag)
 	tx   txStats
 
+	// Pacotes de vídeo enviados (já protegidos), por sequência, para atender o NACK
+	// do celular. Anel de sentHistLen.
+	sent     map[uint16][]byte
+	sentRing []uint16
+
 	stats media.RtcpSenderStats // contadores de envio (p/ Sender Report SRTCP)
 
 	lastOrientation int // última orientação (0..3) vista na extensão RTP do peer; -1 = nenhuma
@@ -307,6 +312,7 @@ func (p *Pipeline) FeedCaptured(au []byte) {
 		tseq++
 		if protected, err := srtp.Protect(pkt); err == nil {
 			p.relay.Broadcast(protected)
+			p.remember(pkt.Header.SequenceNumber, protected)
 		}
 	}
 
@@ -331,10 +337,45 @@ func (p *Pipeline) FeedCaptured(au []byte) {
 	})
 }
 
+const sentHistLen = 512
+
+func (p *Pipeline) remember(seq uint16, protected []byte) {
+	p.txMu.Lock()
+	defer p.txMu.Unlock()
+	if p.sent == nil {
+		p.sent = make(map[uint16][]byte, sentHistLen)
+	}
+	if len(p.sentRing) >= sentHistLen {
+		delete(p.sent, p.sentRing[0])
+		p.sentRing = p.sentRing[1:]
+	}
+	p.sent[seq] = protected
+	p.sentRing = append(p.sentRing, seq)
+}
+
+// Retransmit reenvia os pacotes de vídeo pedidos num NACK do celular (os mesmos
+// bytes SRTP: quem perdeu o pacote o aceita). Devolve quantos achou no histórico.
+func (p *Pipeline) Retransmit(seqs []uint16) int {
+	p.txMu.Lock()
+	found := make([][]byte, 0, len(seqs))
+	for _, s := range seqs {
+		if b, ok := p.sent[s]; ok {
+			found = append(found, b)
+		}
+	}
+	p.txMu.Unlock()
+	for _, b := range found {
+		p.relay.Broadcast(b)
+	}
+	p.txDiag(func(t *txStats) { t.nackPedidos += uint64(len(seqs)); t.reenviados += uint64(len(found)) })
+	return len(found)
+}
+
 // txStats conta o envio do vídeo do atendente (diagnóstico: o celular pedia
 // keyframe sem parar e não havia como saber se os quadros saíam).
 type txStats struct {
 	in, idrIn, semRelay, esperaIdr, congest, congestIdr, sent, idrSent, pkts, bytes, maxBuf uint64
+	nackPedidos, reenviados                                                                 uint64
 	last                                                                                    time.Time
 }
 
@@ -358,7 +399,8 @@ func (p *Pipeline) txDiag(f func(*txStats)) {
 		p.log.Info("video 1:1: envio do atendente (últimos 5 s)", "quadros_do_navegador", t.in, "idr_do_navegador", t.idrIn,
 			"enviados", t.sent, "idr_enviados", t.idrSent, "pacotes", t.pkts, "kbps", t.bytes*8/5000,
 			"sem_relay", t.semRelay, "esperando_1o_idr", t.esperaIdr, "descartados_fila", t.congest,
-			"idr_descartados_fila", t.congestIdr, "fila_bytes_no_descarte", t.maxBuf)
+			"idr_descartados_fila", t.congestIdr, "fila_bytes_no_descarte", t.maxBuf,
+			"nack_pedidos", t.nackPedidos, "reenviados", t.reenviados)
 	}
 }
 

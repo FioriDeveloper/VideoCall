@@ -218,5 +218,12 @@ func (s *SrtcpSender) Remb(bitrate uint64, ssrcs []uint32) ([]byte, error) {
 	return s.protectLocked(BuildRemb(s.ssrc, bitrate, ssrcs))
 }
 
+// Prst monta e protege um PRST (feedback de banda próprio do WhatsApp; ver rtcp_wa.go).
+func (s *SrtcpSender) Prst(bps uint64) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.protectLocked(BuildPrst(s.ssrc, bps))
+}
+
 // Keying devolve as chaves (p/ testes).
 func (s *SrtcpSender) Keying() SrtcpKeys { return s.keys }
