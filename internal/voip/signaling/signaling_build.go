@@ -17,6 +17,9 @@ var (
 	capabilityOffer      = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x13}
 	capabilityVideoOffer = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xfa, 0x13}
 	capabilityPreaccept  = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x07}
+	// INFERIDO (não observado): o preaccept de vídeo troca o byte de mídia 0xbb->0xfa
+	// como o offer de vídeo faz em relação ao de áudio.
+	capabilityVideoPreaccept = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xfa, 0x07}
 )
 
 // CapabilityOffer expõe a capability de offer (bytes) p/ o pacote call.
@@ -33,6 +36,11 @@ var CapabilityGroupOffer = capabilityGroupOffer
 // group_updates reais: 0105f509e0fa53, difere da de áudio só no byte 5: fa vs bb).
 var capabilityGroupVideoOffer = []byte{0x01, 0x05, 0xf5, 0x09, 0xe0, 0xfa, 0x53}
 var CapabilityGroupVideoOffer = capabilityGroupVideoOffer
+
+// SignalingAB liga as variações de sinalização do teste A/B de qualidade de vídeo 1:1
+// (WACALLS_1A1_SIGNALING_AB, padrão desligado): accept de vídeo no formato do offer,
+// preaccept com capability de vídeo e aceite de upgrade sem AV1. Lido a cada stanza.
+func SignalingAB() bool { return core.EnvFlag("WACALLS_1A1_SIGNALING_AB", false) }
 
 func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, callKey []byte, peerJid types.JID, isVideo bool) (waBinary.Node, []types.JID, error) {
 	creator := sock.OwnLID()
@@ -127,7 +135,19 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 		}
 	}
 	if isVideo {
-		acceptContent = append(acceptContent, waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{"enc": "h264"}})
+		if SignalingAB() {
+			// Mesmo formato do offer de vídeo (enc "h.264", dec "H264", screen_*, orientação)
+			// e capability de vídeo, em vez do formato antigo só com enc="h264".
+			acceptContent = append(acceptContent,
+				waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{
+					"enc": "h.264", "dec": "H264",
+					"screen_width": "1920", "screen_height": "1080", "device_orientation": "0",
+				}},
+				waBinary.Node{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: capabilityVideoOffer},
+			)
+		} else {
+			acceptContent = append(acceptContent, waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{"enc": "h264"}})
+		}
 	}
 
 	return waBinary.Node{
@@ -202,6 +222,16 @@ func BuildRejectStanza(peerJid types.JID, callID string, callCreator, ownJid typ
 }
 
 func BuildPreacceptStanza(peerJid types.JID, callID string, callCreator types.JID) waBinary.Node {
+	return BuildPreacceptStanzaFor(peerJid, callID, callCreator, false)
+}
+
+// BuildPreacceptStanzaFor é o preaccept; com isVideo e SignalingAB() anuncia a
+// capability de vídeo (senão sempre a de áudio, como antes).
+func BuildPreacceptStanzaFor(peerJid types.JID, callID string, callCreator types.JID, isVideo bool) waBinary.Node {
+	capability := capabilityPreaccept
+	if isVideo && SignalingAB() {
+		capability = capabilityVideoPreaccept
+	}
 	return waBinary.Node{
 		Tag:   "call",
 		Attrs: waBinary.Attrs{"to": peerJid, "id": GenerateCallStanzaID()},
@@ -211,7 +241,7 @@ func BuildPreacceptStanza(peerJid types.JID, callID string, callCreator types.JI
 			Content: []waBinary.Node{
 				{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "16000"}},
 				{Tag: "encopt", Attrs: waBinary.Attrs{"keygen": "2"}},
-				{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: capabilityPreaccept},
+				{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: capability},
 			},
 		}},
 	}

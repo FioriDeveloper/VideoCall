@@ -67,6 +67,7 @@ func (m *CallManager) initSrtpKeysLocked() {
 		m.mediaClock = media.NewMediaClock()
 	}
 	m.video.SetClock(m.mediaClock)
+	m.setupRtcpLocked(call.EncryptionKey, ourDeviceJid, peerDeviceJid)
 }
 
 func (m *CallManager) reinitSrtpLocked(peerKey []byte, peerJid types.JID) {
@@ -87,6 +88,7 @@ func (m *CallManager) reinitSrtpLocked(peerKey []byte, peerJid types.JID) {
 	}
 	if sess, err := media.NewSrtpSession(sendKM, recvKM, core.SRTPSendAuthTagLen, core.SRTPRecvAuthTagLen); err == nil {
 		m.srtpSession = sess
+		m.rekeyRtcpRecvLocked(peerKey, peerJid.String())
 		m.log.Debug("srtp re-initialized with peer call key")
 	}
 }

@@ -81,9 +81,10 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 	if callKey != nil && len(parsed.Relays) > 0 {
 		m.initSrtpKeysLocked()
 	}
+	isVideoCall := call.MediaType == core.CallMediaTypeVideo
 	m.mu.Unlock()
 
-	preaccept := signaling.BuildPreacceptStanza(peerJid, callID, wanode.MustJID(creator))
+	preaccept := signaling.BuildPreacceptStanzaFor(peerJid, callID, wanode.MustJID(creator), isVideoCall)
 	if err := m.sock.SendNode(ctx, preaccept); err != nil {
 		m.log.Error("send preaccept", "err", err)
 	}
@@ -282,10 +283,11 @@ func (m *CallManager) HandleCallAck(ctx context.Context, node *waBinary.Node) {
 		m.outgoingPreacceptSent = true
 	}
 	endpoints := parsed.Relays
+	isVideoCall := call.MediaType == core.CallMediaTypeVideo
 	m.mu.Unlock()
 
 	if sendPreaccept {
-		_ = m.sock.SendNode(ctx, signaling.BuildPreacceptStanza(peer, callID, creator))
+		_ = m.sock.SendNode(ctx, signaling.BuildPreacceptStanzaFor(peer, callID, creator, isVideoCall))
 	}
 	m.connectRelays(endpoints)
 }

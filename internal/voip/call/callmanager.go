@@ -33,6 +33,10 @@ type CallManager struct {
 
 	video *callvideo.Pipeline
 
+	rtcp       *rtcp1a1              // SRTCP do 1:1 (WACALLS_1A1_PLI / WACALLS_1A1_SRTCP); nil = desligado
+	audioStats media.RtcpSenderStats // contadores de envio do áudio (p/ Sender Report)
+	audioRx    *media.RtpRxStats     // perda/jitter do áudio do peer (p/ Receiver Report)
+
 	firstPacketSent       bool
 	initialTransportSent  bool
 	outgoingPreacceptSent bool
@@ -63,6 +67,8 @@ type CallManager struct {
 	OnEnded       func(*CallInfo)
 	OnPeerAudio   func([]float32)
 	OnPeerVideo   func([]byte)
+	// OnPeerKeyframeRequest: o celular pediu keyframe do nosso vídeo (PLI/FIR autenticado).
+	OnPeerKeyframeRequest func()
 
 	OnVideoUpgradeRequest func(*CallInfo) // o peer pediu um upgrade p/ vídeo
 	OnVideoStateChanged   func(*CallInfo) // qualquer mudança no estado de vídeo
@@ -91,6 +97,7 @@ func NewCallManager(sock core.VoipSocket, log *slog.Logger) *CallManager {
 		}
 	}
 	m.video.OnOrientation = func(o int) { m.notePeerVideoOrientation(o) }
+	m.video.OnKeyframeRequest = m.sendPeerPLI
 	return m
 }
 

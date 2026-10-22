@@ -84,6 +84,9 @@ func (m *CallManager) sendOpusFrameLocked(opus []byte) {
 		pkt.Header.ExtensionData = nil
 	}
 	m.firstPacketSent = true
+	m.audioStats.PacketsSent++
+	m.audioStats.OctetsSent += uint32(len(opus))
+	m.audioStats.RtpTimestamp = pkt.Header.Timestamp
 
 	srtp, err := m.srtpSession.Protect(pkt)
 	if err != nil {
@@ -163,6 +166,10 @@ func (m *CallManager) onRelayData(data []byte) {
 	if len(data) < 12 {
 		return
 	}
+	if media.IsRtcpPacket(data) {
+		m.onRelayRtcp(data)
+		return
+	}
 	pt := data[1] & 0x7f
 	// diagnóstico (opt-in): confirma que CHEGA RTP do relay e com qual payload type/ssrc.
 	if mediaDebugEnabled {
@@ -212,6 +219,7 @@ func (m *CallManager) handleAudioRelayData(data []byte) {
 	srtp := m.srtpSession
 	codec := m.codec
 	held := m.held
+	audioRx := m.audioRx
 	m.mu.Unlock()
 
 	pkt, err := srtp.Unprotect(data)
@@ -222,6 +230,9 @@ func (m *CallManager) handleAudioRelayData(data []byte) {
 			}
 		}
 		return
+	}
+	if audioRx != nil {
+		audioRx.Update(pkt.Header.SequenceNumber, pkt.Header.Timestamp, time.Now())
 	}
 	if len(pkt.Payload) == 0 {
 		return

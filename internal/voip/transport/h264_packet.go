@@ -135,6 +135,12 @@ type H264Depacketizer struct {
 	fuActive bool
 }
 
+// Reset descarta qualquer FU-A em andamento (ex.: após uma lacuna de pacotes).
+func (d *H264Depacketizer) Reset() {
+	d.fuActive = false
+	d.fuBuf = d.fuBuf[:0]
+}
+
 func (d *H264Depacketizer) Depacketize(payload []byte) [][]byte {
 	if len(payload) < 1 {
 		return nil

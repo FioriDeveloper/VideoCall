@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 	"wacalls/internal/voip/core"
 
@@ -70,6 +71,7 @@ type relayConnection struct {
 	localUfrag string
 	keepalive  *time.Ticker
 	stopCh     chan struct{}
+	lastRecv   atomic.Int64 // UnixNano da última mensagem de mídia recebida por este relay
 }
 
 type SctpRelayManager struct {
@@ -233,6 +235,9 @@ func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
 	})
 	channel.OnClose(func() { m.closeConnection(id) })
 	channel.OnMessage(func(msg webrtc.DataChannelMessage) {
+		if len(msg.Data) > 1 && !IsStunPacket(msg.Data) {
+			conn.lastRecv.Store(time.Now().UnixNano())
+		}
 		if m.onReceive != nil {
 			m.onReceive(msg.Data)
 		}
@@ -463,13 +468,39 @@ func (m *SctpRelayManager) sendRaw(conn *relayConnection, data []byte) {
 	}
 }
 
+var singleRelayEnabled = core.EnvFlag("WACALLS_1A1_SINGLE_RELAY", false)
+
+// activeRelayWindow: um relay conta como "ativo" se entregou mídia nesse intervalo.
+const activeRelayWindow = 3 * time.Second
+
+// pickActive devolve só o relay que entregou mídia mais recentemente (dentro da janela),
+// ou nil quando ainda não dá para saber (aí o chamador manda em todos).
+func pickActive(conns []*relayConnection, now time.Time) *relayConnection {
+	var best *relayConnection
+	var bestAt int64
+	for _, c := range conns {
+		if at := c.lastRecv.Load(); c.state == relayStateOpen && at > bestAt && now.UnixNano()-at < int64(activeRelayWindow) {
+			best, bestAt = c, at
+		}
+	}
+	return best
+}
+
+// Broadcast manda a mídia nos relays abertos. Com WACALLS_1A1_SINGLE_RELAY (padrão
+// desligado), no 1:1, manda só no relay ativo em vez de dobrar o envio no mesmo caminho.
 func (m *SctpRelayManager) Broadcast(data []byte) {
 	m.mu.Lock()
 	conns := make([]*relayConnection, 0, len(m.connections))
 	for _, c := range m.connections {
 		conns = append(conns, c)
 	}
+	grp := m.groupAllocate != nil
 	m.mu.Unlock()
+	if !grp && len(conns) > 1 && singleRelayEnabled {
+		if a := pickActive(conns, time.Now()); a != nil {
+			conns = []*relayConnection{a}
+		}
+	}
 	for _, c := range conns {
 		m.sendRaw(c, data)
 	}

@@ -39,9 +39,18 @@ const buildVideoChannel = (pc: RTCPeerConnection): VideoChannel => {
     maxRetransmits: 0,
   });
   videoDc.binaryType = "arraybuffer";
-  videoDc.onmessage = (e: MessageEvent<ArrayBuffer>) => receiver.decode(e.data);
-
   let sender: VideoSender | null = null;
+  videoDc.onmessage = (e: MessageEvent<ArrayBuffer | string>) => {
+    // Texto = controle JSON do servidor; binário = access unit H.264 do contato.
+    if (typeof e.data === "string") {
+      try {
+        if (JSON.parse(e.data)?.type === "keyframe_request") sender?.forceKeyframe();
+      } catch {}
+      return;
+    }
+    receiver.decode(e.data);
+  };
+
   let pending: MediaStreamTrack | null = null;
   let open = false;
 

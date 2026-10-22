@@ -865,6 +865,7 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 	bridge.OnBrowserVideo = func(au []byte) {
 		ac.cm.FeedCapturedVideo(au)
 	}
+	bridge.OnBrowserKeyframeRequest = ac.cm.RequestPeerKeyframe
 	bridge.OnTerminalICE = func() {
 		go sess.terminateCall(callID, core.EndCallReasonUserEnded)
 	}

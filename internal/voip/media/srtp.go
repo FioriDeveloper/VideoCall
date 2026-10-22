@@ -122,8 +122,8 @@ func (c *SrtpContext) Unprotect(data []byte) (*RtpPacket, error) {
 		return nil, &SrtpError{SrtpErrPacketTooShort, fmt.Sprintf("no payload: %dB total, %dB header, auth=%d", len(data), headerSize, c.authTagLen)}
 	}
 
-	c.updateRoc(header.SequenceNumber)
-	index := c.packetIndex(header.SequenceNumber)
+	roc := c.updateRoc(header.SequenceNumber)
+	index := (uint64(roc) << 16) | uint64(header.SequenceNumber)
 
 	iv := c.generateIV(header.Ssrc, index)
 	decrypted := make([]byte, payloadLen)
@@ -134,18 +134,32 @@ func (c *SrtpContext) Unprotect(data []byte) (*RtpPacket, error) {
 	return &RtpPacket{Header: header, Payload: decrypted}, nil
 }
 
-func (c *SrtpContext) updateRoc(seq uint16) {
+// updateRoc estima o ROC do pacote recebido (RFC 3711 §3.3.1) e avança o estado só
+// quando o pacote é o mais novo visto. Pacotes FORA DE ORDEM perto da virada da
+// sequência (seq 0 chegando antes do 65535, ou o contrário) usam o ROC certo e não
+// mexem no estado — antes, o 65535 atrasado fazia o ROC subir duas vezes e todo o
+// resto do stream decifrava lixo (o datachannel do relay é não ordenado).
+func (c *SrtpContext) updateRoc(seq uint16) uint32 {
 	if !c.initialized {
 		c.lastSeq = seq
 		c.initialized = true
-		return
+		return c.roc
 	}
-
-	diff := int32(seq) - int32(c.lastSeq)
-	if diff < -32768 {
+	roc := c.roc
+	if c.lastSeq < 0x8000 {
+		if seq > c.lastSeq && seq-c.lastSeq > 0x8000 && roc > 0 {
+			return roc - 1 // pacote atrasado da volta anterior
+		}
+	} else if c.lastSeq-0x8000 > seq {
+		// virou a sequência: este pacote já é da volta seguinte
 		c.roc++
+		c.lastSeq = seq
+		return c.roc
 	}
-	c.lastSeq = seq
+	if seq > c.lastSeq {
+		c.lastSeq = seq
+	}
+	return roc
 }
 
 func (c *SrtpContext) packetIndex(seq uint16) uint64 {

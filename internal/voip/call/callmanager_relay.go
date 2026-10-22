@@ -2,6 +2,7 @@ package call
 
 import (
 	"wacalls/internal/voip/core"
+	"wacalls/internal/voip/media"
 	"wacalls/internal/voip/transport"
 )
 
@@ -30,6 +31,7 @@ func (m *CallManager) onRelayConnected() {
 		if err := call.ApplyTransition(Transition{Type: TransitionMediaConnected}); err == nil {
 			m.emitState()
 			m.startMediaSendLoopLocked()
+			m.startRtcpLoopLocked()
 			m.log.Info("relay connected → active", "call_id", call.CallID)
 		}
 	}
@@ -96,6 +98,8 @@ func (m *CallManager) cleanupMedia() {
 	m.captureBuf = nil
 	m.audioTimelineSet = false
 	m.audioPlayedSamples = 0
+	m.stopRtcpLocked()
+	m.audioStats = media.RtcpSenderStats{}
 	m.mu.Unlock()
 
 	m.video.Reset()

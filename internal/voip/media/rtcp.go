@@ -170,3 +170,49 @@ func RtcpRequestsKeyframe(data []byte, localVideoSsrc uint32) bool {
 	}
 	return false
 }
+
+// RtcpPtRr é o Receiver Report (RFC 3550).
+const RtcpPtRr uint8 = 201
+
+// BuildReceiverReport monta um RR (PT 201) de UM bloco: senderSsrc é o nosso stream
+// que "reporta" e block o bloco de 24 bytes de RtpRxStats.Report.
+func BuildReceiverReport(senderSsrc uint32, block [24]byte, profileExtension bool) [32]byte {
+	var buf [32]byte
+	buf[0] = 0x81 // V=2, RC=1
+	if profileExtension {
+		buf[0] |= 0x10
+	}
+	buf[1] = RtcpPtRr
+	binary.BigEndian.PutUint16(buf[2:4], 7) // (7+1)*4 = 32 bytes
+	binary.BigEndian.PutUint32(buf[4:8], senderSsrc)
+	copy(buf[8:], block[:])
+	return buf
+}
+
+// SenderReportInfo é o que precisamos de um SR recebido p/ preencher LSR/DLSR.
+type SenderReportInfo struct {
+	SSRC   uint32
+	NtpMid uint32 // 32 bits do meio do NTP (LSR)
+}
+
+// ParseSenderReports extrai os SR (PT 200) de um RTCP composto já decifrado.
+func ParseSenderReports(data []byte) []SenderReportInfo {
+	var out []SenderReportInfo
+	for off := 0; off+4 <= len(data); {
+		if (data[off]>>6)&0x03 != 2 {
+			return out
+		}
+		l := (int(binary.BigEndian.Uint16(data[off+2:off+4])) + 1) * 4
+		if l < 8 || off+l > len(data) {
+			return out
+		}
+		if data[off+1] == RtcpPtSr && l >= 16 {
+			out = append(out, SenderReportInfo{
+				SSRC:   binary.BigEndian.Uint32(data[off+4 : off+8]),
+				NtpMid: binary.BigEndian.Uint32(data[off+10 : off+14]),
+			})
+		}
+		off += l
+	}
+	return out
+}
