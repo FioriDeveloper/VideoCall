@@ -69,6 +69,9 @@ type CallManager struct {
 	OnPeerVideo   func([]byte)
 	// OnPeerKeyframeRequest: o celular pediu keyframe do nosso vídeo (PLI/FIR autenticado).
 	OnPeerKeyframeRequest func()
+	// OnPeerBitrateHint: o PRST do celular mudou (bps). Suposição: é a banda que ele
+	// aguenta receber do nosso vídeo; o navegador ajusta o encoder (WACALLS_1A1_PRST_SEGUIR).
+	OnPeerBitrateHint func(bps uint64)
 
 	OnVideoUpgradeRequest func(*CallInfo) // o peer pediu um upgrade p/ vídeo
 	OnVideoStateChanged   func(*CallInfo) // qualquer mudança no estado de vídeo

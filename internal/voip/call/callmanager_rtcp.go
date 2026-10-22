@@ -26,6 +26,8 @@ import (
 //	                                      Visto depois: o 206/15 do celular é "PRST", não REMB;
 //	WACALLS_1A1_PRST   (padrão DESLIGADO) PRST (formato do celular, ver media/rtcp_wa.go) a
 //	                                      cada 1,5 s com WACALLS_1A1_PRST_BPS (padrão 300000);
+//	WACALLS_1A1_PRST_SEGUIR (padrão DESLIGADO) repassa o PRST do celular ao navegador
+//	                                      ({"type":"bitrate","bps":N} no canal h264);
 //	WACALLS_1A1_NACK   (padrão ligado, com a leitura) reenvia os pacotes do nosso vídeo
 //	                                      que o celular pede por NACK (205/1);
 //	WACALLS_1A1_RR     (padrão DESLIGADO) Receiver Report (PT 201) com perda/jitter do áudio e
@@ -52,6 +54,8 @@ type rtcp1a1 struct {
 	remb     uint64 // WACALLS_1A1_REMB: bps anunciados (0 = desligado)
 	prst     uint64 // WACALLS_1A1_PRST: bps anunciados (0 = desligado)
 	nack     bool   // WACALLS_1A1_NACK
+	seguir   bool   // WACALLS_1A1_PRST_SEGUIR
+	dica     uint64 // último bps repassado ao navegador
 	prstLog  time.Time
 	prstSeen uint64
 	rembLog  time.Time
@@ -95,7 +99,8 @@ func (m *CallManager) setupRtcpLocked(callKey []byte, ourDeviceJid, peerDeviceJi
 		return
 	}
 	r := &rtcp1a1{tagLen: rtcpTagLen(), sr: sr, srSend: srSend, rr: rr, remb: remb, prst: prst,
-		nack: core.EnvFlag("WACALLS_1A1_NACK", true), seen: map[[2]uint8]bool{}}
+		nack: core.EnvFlag("WACALLS_1A1_NACK", true), seguir: core.EnvFlag("WACALLS_1A1_PRST_SEGUIR", false),
+		seen: map[[2]uint8]bool{}}
 	profile := core.EnvFlag("WACALLS_1A1_RTCP_PROFILE_BIT", true)
 	var err error
 	if m.selfSsrc != 0 {
@@ -297,6 +302,11 @@ func (m *CallManager) onRelayRtcp(data []byte) {
 	m.logRtcpKinds(r, plain)
 	for _, bps := range media.ParsePrst(plain) {
 		r.mu.Lock()
+		repassar := r.seguir && bps != r.dica
+		if repassar {
+			r.dica = bps
+		}
+		cb := m.OnPeerBitrateHint
 		prev := r.prstSeen
 		logIt := time.Since(r.prstLog) >= 10*time.Second || prev == 0 || bps*4 < prev*3 || bps*3 > prev*4
 		if logIt {
@@ -305,6 +315,9 @@ func (m *CallManager) onRelayRtcp(data []byte) {
 		r.mu.Unlock()
 		if logIt {
 			m.log.Info("srtcp 1:1: PRST do celular (banda estimada para o nosso envio, suposição)", "bps", bps)
+		}
+		if repassar && cb != nil {
+			cb(bps)
 		}
 	}
 	if vs := m.video.SelfSsrc(); vs != 0 && r.nack {

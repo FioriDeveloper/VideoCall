@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -584,6 +585,13 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 	}
 	// O celular pediu keyframe do nosso vídeo (só com WACALLS_1A1_SRTCP): avisa o
 	// navegador por texto no canal h264 (o cliente força um IDR).
+	// O celular indicou a banda do nosso vídeo (PRST, só com WACALLS_1A1_PRST_SEGUIR):
+	// o navegador ajusta o bitrate do encoder.
+	cm.OnPeerBitrateHint = func(bps uint64) {
+		if ac, ok := s.reg.get(callID); ok && ac.bridge != nil {
+			_ = ac.bridge.WriteVideoControl(`{"type":"bitrate","bps":` + strconv.FormatUint(bps, 10) + `}`)
+		}
+	}
 	cm.OnPeerKeyframeRequest = func() {
 		if ac, ok := s.reg.get(callID); ok && ac.bridge != nil {
 			_ = ac.bridge.WriteVideoControl(`{"type":"keyframe_request"}`)
