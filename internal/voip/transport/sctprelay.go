@@ -501,9 +501,32 @@ func (m *SctpRelayManager) Broadcast(data []byte) {
 			conns = []*relayConnection{a}
 		}
 	}
+	if len(conns) > 1 {
+		conns = skipCongested(conns)
+	}
 	for _, c := range conns {
 		m.sendRaw(c, data)
 	}
+}
+
+// relayCongestedBytes: fila do datachannel acima disso = relay travado ou lento.
+const relayCongestedBytes = 64 * 1024
+
+// skipCongested tira do envio os relays com fila cheia quando há outro aberto com
+// espaço. Antes a mídia ia para todos e o vídeo olhava a MAIOR fila: um relay
+// travado fazia descartar todo quadro (até os IDR) também no relay bom, e o celular
+// pedia keyframe sem parar sem nunca receber um (visto em produção).
+func skipCongested(conns []*relayConnection) []*relayConnection {
+	out := conns[:0:0]
+	for _, c := range conns {
+		if c.state == relayStateOpen && c.channel != nil && c.channel.BufferedAmount() <= relayCongestedBytes {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		return conns
+	}
+	return out
 }
 
 func (m *SctpRelayManager) countOpenLocked() int {
@@ -523,15 +546,18 @@ func (m *SctpRelayManager) BufferedAmount() uint64 {
 		conns = append(conns, c)
 	}
 	m.mu.Unlock()
-	var maxBuf uint64
+	// A MENOR fila entre os relays abertos: quem pergunta quer saber se ainda há
+	// por onde mandar (o Broadcast pula o relay congestionado, ver skipCongested).
+	var minBuf uint64
+	first := true
 	for _, c := range conns {
 		if c.state == relayStateOpen && c.channel != nil {
-			if b := c.channel.BufferedAmount(); b > maxBuf {
-				maxBuf = b
+			if b := c.channel.BufferedAmount(); first || b < minBuf {
+				minBuf, first = b, false
 			}
 		}
 	}
-	return maxBuf
+	return minBuf
 }
 
 func (m *SctpRelayManager) HasConnection() bool {

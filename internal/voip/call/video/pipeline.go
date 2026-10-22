@@ -46,6 +46,9 @@ type Pipeline struct {
 	transportSeq     uint16 // sequência transport (por pacote)
 	keyframeRequired bool   // o primeiro frame enviado precisa ser IDR
 
+	txMu sync.Mutex // só o diagnóstico do envio (txDiag)
+	tx   txStats
+
 	stats media.RtcpSenderStats // contadores de envio (p/ Sender Report SRTCP)
 
 	lastOrientation int // última orientação (0..3) vista na extensão RTP do peer; -1 = nenhuma
@@ -217,7 +220,12 @@ func (p *Pipeline) FeedCaptured(au []byte) {
 	first := p.lastAUAt.IsZero()
 	clock := p.clock
 	p.mu.Unlock()
-	if rtp == nil || srtp == nil || !p.relay.HasConnection() || len(au) == 0 {
+	if rtp == nil || srtp == nil || len(au) == 0 {
+		return
+	}
+	p.txDiag(func(t *txStats) { t.in++ })
+	if !p.relay.HasConnection() {
+		p.txDiag(func(t *txStats) { t.semRelay++ })
 		return
 	}
 	nalus := transport.SplitAnnexB(au)
@@ -231,8 +239,12 @@ func (p *Pipeline) FeedCaptured(au []byte) {
 			break
 		}
 	}
+	if idr {
+		p.txDiag(func(t *txStats) { t.idrIn++ })
+	}
 	// O primeiro frame enviado precisa ser keyframe, senão o peer não decodifica.
 	if keyframeRequired && !idr {
+		p.txDiag(func(t *txStats) { t.esperaIdr++ })
 		return
 	}
 	// Junta TODOS os NALUs (menos AUD tipo 9) num único access unit Annex-B e fragmenta
@@ -250,7 +262,16 @@ func (p *Pipeline) FeedCaptured(au []byte) {
 	if len(packed) == 0 {
 		return
 	}
-	if p.relay.BufferedAmount() > congestionDropBytes {
+	if buf := p.relay.BufferedAmount(); buf > congestionDropBytes {
+		p.txDiag(func(t *txStats) {
+			t.congest++
+			if idr {
+				t.congestIdr++
+			}
+			if buf > t.maxBuf {
+				t.maxBuf = buf
+			}
+		})
 		return
 	}
 	if first {
@@ -295,6 +316,45 @@ func (p *Pipeline) FeedCaptured(au []byte) {
 	p.stats.OctetsSent += uint32(len(packed))
 	p.stats.RtpTimestamp = rtp.Timestamp()
 	p.mu.Unlock()
+	p.txDiag(func(t *txStats) {
+		t.sent++
+		t.pkts += uint64(len(payloads))
+		t.bytes += uint64(len(packed))
+		if idr {
+			t.idrSent++
+		}
+	})
+}
+
+// txStats conta o envio do vídeo do atendente (diagnóstico: o celular pedia
+// keyframe sem parar e não havia como saber se os quadros saíam).
+type txStats struct {
+	in, idrIn, semRelay, esperaIdr, congest, congestIdr, sent, idrSent, pkts, bytes, maxBuf uint64
+	last                                                                                    time.Time
+}
+
+const txDiagInterval = 5 * time.Second
+
+func (p *Pipeline) txDiag(f func(*txStats)) {
+	p.txMu.Lock()
+	f(&p.tx)
+	now := time.Now()
+	if p.tx.last.IsZero() {
+		p.tx.last = now
+	}
+	var t txStats
+	logIt := now.Sub(p.tx.last) >= txDiagInterval
+	if logIt {
+		t = p.tx
+		p.tx = txStats{last: now}
+	}
+	p.txMu.Unlock()
+	if logIt {
+		p.log.Info("video 1:1: envio do atendente (últimos 5 s)", "quadros_do_navegador", t.in, "idr_do_navegador", t.idrIn,
+			"enviados", t.sent, "idr_enviados", t.idrSent, "pacotes", t.pkts, "kbps", t.bytes*8/5000,
+			"sem_relay", t.semRelay, "esperando_1o_idr", t.esperaIdr, "descartados_fila", t.congest,
+			"idr_descartados_fila", t.congestIdr, "fila_bytes_no_descarte", t.maxBuf)
+	}
 }
 
 // SelfSsrc devolve o SSRC do nosso stream de vídeo (0 antes do Setup).

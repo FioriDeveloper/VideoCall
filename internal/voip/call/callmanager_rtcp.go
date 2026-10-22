@@ -1,6 +1,7 @@
 package call
 
 import (
+	"encoding/hex"
 	"os"
 	"strconv"
 	"sync"
@@ -317,7 +318,13 @@ func (m *CallManager) logRtcpKinds(r *rtcp1a1, plain []byte) {
 		r.seen[key] = true
 		r.mu.Unlock()
 		if first {
-			m.log.Info("srtcp 1:1: tipo de RTCP do celular", "pt", key[0], "fmt_ou_rc", key[1], "bytes", l)
+			// Os bytes (decifrados: SSRCs e números do protocolo, nada de chave) do
+			// feedback que ainda não entendemos, para decifrar o formato.
+			var bytesHex string
+			if key[0] == 205 || key[0] == 206 || key[0] == 204 {
+				bytesHex = hex.EncodeToString(plain[off : off+l])
+			}
+			m.log.Info("srtcp 1:1: tipo de RTCP do celular", "pt", key[0], "fmt_ou_rc", key[1], "bytes", l, "hex", bytesHex)
 		}
 		off += l
 	}
