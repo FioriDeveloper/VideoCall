@@ -2,6 +2,23 @@
 
 Todas as mudanças relevantes do AstraCalls.
 
+## Fork FioriDeveloper/VideoCall — qualidade do vídeo 1:1 (não lançado)
+
+Alterações deste fork (AGPL-3.0, cabeçalhos e LICENSE intactos). Detalhes, evidências e o
+que medir numa chamada real em [`QUALIDADE-VIDEO-1A1.md`](QUALIDADE-VIDEO-1A1.md).
+
+- **Recepção do vídeo do contato (ligada):** filtro de SSRC, descarte de duplicados,
+  buffer de reordenação (40 ms), lacuna → quadro descartado até o próximo IDR, e `srtp`/
+  `depack` serializados (antes sem lock). `WACALLS_1A1_RX=0` volta ao caminho antigo.
+- **PLI no 1:1 (ligado):** pede keyframe ao peer até o 1º IDR e em toda lacuna; aceita
+  `{"type":"pli"}` (texto) do navegador no canal `h264`. `WACALLS_1A1_PLI=0` desliga.
+- **fix(srtp):** ROC tolerante a reordenação na virada da sequência (afetava também áudio/grupo).
+- **SRTCP 1:1 (desligado):** SR+SDES periódico e leitura de PLI/FIR do celular
+  (`WACALLS_1A1_SRTCP=1`, tag `WACALLS_1A1_SRTCP_TAG`); Receiver Report (`WACALLS_1A1_RR=1`).
+- **A/B (desligados):** `WACALLS_1A1_SIGNALING_AB`, `WACALLS_1A1_ACTIVE_RELAY`.
+- Cliente (`video-channel.ts`, `widget.js`): ignora texto no canal `h264`, envia PLI do decoder
+  e força IDR em `{"type":"keyframe_request"}`.
+
 ## v1.1.2 — 2026-10-15
 
 A versão dos **formulários nativos do WhatsApp Business**, das **comunidades** e da
