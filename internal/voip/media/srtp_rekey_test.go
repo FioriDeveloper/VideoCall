@@ -30,3 +30,19 @@ func TestSrtpContextWithKeyingPreservesROC(t *testing.T) {
 		t.Fatal("session key did not change")
 	}
 }
+
+// Pacotes fora de ordem na virada da sequência não podem corromper o ROC.
+func TestUpdateRocReorderAcrossWrap(t *testing.T) {
+	c := &SrtpContext{}
+	steps := []struct {
+		seq uint16
+		roc uint32
+	}{
+		{65533, 0}, {65534, 0}, {0, 1}, {65535, 0}, {1, 1}, {2, 1}, {65535, 0}, {3, 1},
+	}
+	for i, s := range steps {
+		if got := c.updateRoc(s.seq); got != s.roc {
+			t.Fatalf("passo %d seq=%d: roc=%d, esperado %d", i, s.seq, got, s.roc)
+		}
+	}
+}
