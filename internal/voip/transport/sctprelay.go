@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"os"
 	"regexp"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"wacalls/internal/voip/core"
 
@@ -70,6 +73,7 @@ type relayConnection struct {
 	localUfrag string
 	keepalive  *time.Ticker
 	stopCh     chan struct{}
+	lastRx     atomic.Int64 // UnixNano da última mensagem recebida neste relay
 }
 
 type SctpRelayManager struct {
@@ -233,6 +237,7 @@ func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
 	})
 	channel.OnClose(func() { m.closeConnection(id) })
 	channel.OnMessage(func(msg webrtc.DataChannelMessage) {
+		conn.lastRx.Store(time.Now().UnixNano())
 		if m.onReceive != nil {
 			m.onReceive(msg.Data)
 		}
@@ -463,11 +468,44 @@ func (m *SctpRelayManager) sendRaw(conn *relayConnection, data []byte) {
 	}
 }
 
+// activeRelayOnly liga o envio de mídia SÓ no relay ativo (WACALLS_1A1_ACTIVE_RELAY;
+// padrão desligado): o Broadcast padrão manda tudo nos 2 relays abertos, o que dobra o
+// nosso envio no mesmo caminho estreito.
+func activeRelayOnly() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WACALLS_1A1_ACTIVE_RELAY"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// pickActiveRelay escolhe, entre os relays abertos, o que recebeu dados mais
+// recentemente (o caminho que o WhatsApp está de fato usando); empate/sem dados =
+// menor id (determinístico).
+func pickActiveRelay(conns []*relayConnection) *relayConnection {
+	var best *relayConnection
+	for _, c := range conns {
+		if c.state != relayStateOpen {
+			continue
+		}
+		if best == nil || c.lastRx.Load() > best.lastRx.Load() ||
+			(c.lastRx.Load() == best.lastRx.Load() && c.id < best.id) {
+			best = c
+		}
+	}
+	return best
+}
+
 func (m *SctpRelayManager) Broadcast(data []byte) {
 	m.mu.Lock()
 	conns := make([]*relayConnection, 0, len(m.connections))
 	for _, c := range m.connections {
 		conns = append(conns, c)
+	}
+	if activeRelayOnly() && m.groupAllocate == nil && len(conns) > 1 {
+		if best := pickActiveRelay(conns); best != nil {
+			conns = []*relayConnection{best}
+		}
 	}
 	m.mu.Unlock()
 	for _, c := range conns {

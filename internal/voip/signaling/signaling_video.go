@@ -87,3 +87,12 @@ func BuildVideoAck(original *waBinary.Node) (waBinary.Node, bool) {
 	}
 	return waBinary.Node{Tag: "ack", Attrs: attrs}, true
 }
+
+// VideoDecForAccept é o dec anunciado no aceite de upgrade: só H264 há decoder aqui;
+// "H264,AV1" (padrão) só muda com o A/B WACALLS_1A1_SIGNALING_AB ligado.
+func VideoDecForAccept() string {
+	if ABSignaling() {
+		return VideoDecRequest
+	}
+	return VideoDecAccept
+}

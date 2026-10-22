@@ -3,6 +3,8 @@ package signaling
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"wacalls/internal/voip/core"
 	"wacalls/internal/voip/wanode"
 
@@ -14,9 +16,10 @@ import (
 // alinhados ao WhatsApp Web atual (referência: meowcaller/whatsapp-rust). O byte 5
 // era 0xe4 (stale) — clientes atuais ignoravam a chamada em silêncio; passou a 0xe0.
 var (
-	capabilityOffer      = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x13}
-	capabilityVideoOffer = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xfa, 0x13}
-	capabilityPreaccept  = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x07}
+	capabilityOffer          = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x13}
+	capabilityVideoOffer     = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xfa, 0x13}
+	capabilityPreaccept      = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x07}
+	capabilityVideoPreaccept = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xfa, 0x07}
 )
 
 // CapabilityOffer expõe a capability de offer (bytes) p/ o pacote call.
@@ -100,6 +103,17 @@ func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, 
 	}, rawDevices, nil
 }
 
+// ABSignaling liga as variações de sinalização do teste A/B (WACALLS_1A1_SIGNALING_AB;
+// padrão desligado): accept de vídeo no formato do offer, preaccept com capability de
+// vídeo e aceite de upgrade sem AV1. Lido a cada chamada.
+func ABSignaling() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WACALLS_1A1_SIGNALING_AB"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string, callKey []byte, peerJid, callCreator types.JID, isVideo bool) (waBinary.Node, error) {
 	if err := sock.AssertSessions(ctx, []types.JID{callCreator}, true); err != nil {
 		return waBinary.Node{}, fmt.Errorf("assert creator session: %w", err)
@@ -127,7 +141,18 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 		}
 	}
 	if isVideo {
-		acceptContent = append(acceptContent, waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{"enc": "h264"}})
+		if ABSignaling() {
+			// Mesmo formato do offer do WhatsApp Web (enc "h.264", dec "H264", tela e
+			// orientação) e a capability de vídeo.
+			acceptContent = append(acceptContent,
+				waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{
+					"enc": "h.264", "dec": "H264",
+					"screen_width": "1920", "screen_height": "1080", "device_orientation": "0",
+				}},
+				waBinary.Node{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: capabilityVideoOffer})
+		} else {
+			acceptContent = append(acceptContent, waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{"enc": "h264"}})
+		}
 	}
 
 	return waBinary.Node{
@@ -202,6 +227,17 @@ func BuildRejectStanza(peerJid types.JID, callID string, callCreator, ownJid typ
 }
 
 func BuildPreacceptStanza(peerJid types.JID, callID string, callCreator types.JID) waBinary.Node {
+	return BuildPreacceptStanzaFor(peerJid, callID, callCreator, false)
+}
+
+// BuildPreacceptStanzaFor é o preaccept; em chamada de vídeo com o A/B ligado usa a
+// capability de vídeo (SUPOSIÇÃO: o blob é o de áudio com o byte 5 = 0xfa, como o offer
+// de vídeo difere do de áudio).
+func BuildPreacceptStanzaFor(peerJid types.JID, callID string, callCreator types.JID, isVideo bool) waBinary.Node {
+	capability := capabilityPreaccept
+	if isVideo && ABSignaling() {
+		capability = capabilityVideoPreaccept
+	}
 	return waBinary.Node{
 		Tag:   "call",
 		Attrs: waBinary.Attrs{"to": peerJid, "id": GenerateCallStanzaID()},
@@ -211,7 +247,7 @@ func BuildPreacceptStanza(peerJid types.JID, callID string, callCreator types.JI
 			Content: []waBinary.Node{
 				{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "16000"}},
 				{Tag: "encopt", Attrs: waBinary.Attrs{"keygen": "2"}},
-				{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: capabilityPreaccept},
+				{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: capability},
 			},
 		}},
 	}
