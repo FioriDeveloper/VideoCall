@@ -194,7 +194,7 @@ func (m *CallManager) AcceptVideoUpgrade(ctx context.Context) error {
 
 	accept := signaling.BuildVideoStateStanza(signaling.VideoStateParams{
 		CallID: callID, To: peer, CallCreator: creator,
-		State: signaling.VideoStateUpgradeAccept, Dec: signaling.VideoDecAccept,
+		State: signaling.VideoStateUpgradeAccept, Dec: signaling.VideoDecForAccept(),
 	})
 	if err := m.sock.SendNode(ctx, accept); err != nil {
 		return err

@@ -29,6 +29,15 @@ const (
 	VideoDecAccept  = "H264,AV1"
 )
 
+// VideoDecForAccept é o dec anunciado ao aceitar um upgrade: só há decoder H264
+// (sem AV1) — com SignalingAB() anuncia só "H264", senão o valor legado.
+func VideoDecForAccept() string {
+	if SignalingAB() {
+		return VideoDecRequest
+	}
+	return VideoDecAccept
+}
+
 // VideoStateParams descreve uma stanza <video state=N> de saída.
 type VideoStateParams struct {
 	CallID            string
