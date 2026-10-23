@@ -63,6 +63,7 @@ func id5Value() uint16 {
 type rxExtStats struct {
 	mu     sync.Mutex
 	last   map[byte]string
+	cnt    map[byte]uint64 // em quantos pacotes cada elemento apareceu
 	min    map[byte]uint32
 	max    map[byte]uint32
 	n      uint64
@@ -78,6 +79,7 @@ func (p *Pipeline) noteRxExt(h *media.RtpHeader) {
 	st.mu.Lock()
 	if st.last == nil {
 		st.last, st.min, st.max = map[byte]string{}, map[byte]uint32{}, map[byte]uint32{}
+		st.cnt = map[byte]uint64{}
 		st.since = time.Now()
 	}
 	ext := h.ExtensionData
@@ -92,7 +94,8 @@ func (p *Pipeline) noteRxExt(h *media.RtpHeader) {
 			break
 		}
 		v := ext[off : off+l]
-		if id != 3 && id != 9 { // 3: quadro/orientação; 9: sequência de transporte
+		if id != 3 { // 3: quadro/orientação (o resto, inclusive o 9, vai para o log)
+			st.cnt[id]++
 			st.last[id] = hex.EncodeToString(v)
 			var num uint32
 			for _, b := range v {
@@ -122,12 +125,13 @@ func (p *Pipeline) noteRxExt(h *media.RtpHeader) {
 		var b strings.Builder
 		for _, i := range ids {
 			id := byte(i)
-			fmt.Fprintf(&b, "id%d=%s(min %d max %d) ", id, st.last[id], st.min[id], st.max[id])
+			fmt.Fprintf(&b, "id%d=%s(min %d max %d, em %d pacotes) ", id, st.last[id], st.min[id], st.max[id], st.cnt[id])
 		}
 		line = b.String()
 		id5Mirror.Store(st.winMax)
 		st.winMax = 0
 		st.last, st.min, st.max = map[byte]string{}, map[byte]uint32{}, map[byte]uint32{}
+		st.cnt = map[byte]uint64{}
 		st.since = time.Now()
 	}
 	n := st.n
