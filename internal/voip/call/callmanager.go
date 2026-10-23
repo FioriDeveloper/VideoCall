@@ -38,6 +38,7 @@ type CallManager struct {
 	audioStats media.RtcpSenderStats // contadores de envio do áudio (p/ Sender Report)
 	audioRx    *media.RtpRxStats     // perda/jitter do áudio do peer (p/ Receiver Report)
 	audioRxD   audioRxDiag           // diagnóstico da recepção do áudio do contato
+	relayOther map[string]int        // mensagens do relay que não são mídia (diagnóstico)
 
 	// reordenação curta do áudio do contato (queuePeerAudio)
 	audioReoMu    sync.Mutex

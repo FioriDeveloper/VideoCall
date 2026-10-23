@@ -1,6 +1,8 @@
 package call
 
 import (
+	"encoding/hex"
+	"fmt"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -159,9 +161,11 @@ func (m *CallManager) nextMohFrameLocked(frameSize int) []float32 {
 
 func (m *CallManager) onRelayData(data []byte) {
 	if transport.IsStunPacket(data) {
+		m.noteRelayOther("stun", data)
 		return
 	}
 	if !transport.IsRtpPacket(data) {
+		m.noteRelayOther("outro", data)
 		return
 	}
 	if len(data) < 12 {
@@ -187,6 +191,47 @@ func (m *CallManager) onRelayData(data []byte) {
 		m.handleAudioRelayData(data)
 	case core.PayloadTypeWhatsAppH264:
 		m.video.HandleRelayData(data)
+	}
+}
+
+// noteRelayOther registra (as 3 primeiras de cada tipo) as mensagens do relay que
+// não são RTP/RTCP do celular: a procura do retorno de banda que o relay dá aos
+// aparelhos (palestra da Meta: "tells devices at which bitrates they should be
+// transmitting"). Do STUN só o tipo da mensagem e os tipos dos atributos (os
+// valores podem ter credenciais); do resto, os primeiros 24 bytes.
+func (m *CallManager) noteRelayOther(kind string, data []byte) {
+	var key string
+	var detalhe string
+	if kind == "stun" && len(data) >= 20 {
+		key = fmt.Sprintf("stun %04x", uint16(data[0])<<8|uint16(data[1]))
+		var tipos []string
+		for off := 20; off+4 <= len(data); {
+			t := uint16(data[off])<<8 | uint16(data[off+1])
+			l := int(uint16(data[off+2])<<8 | uint16(data[off+3]))
+			tipos = append(tipos, fmt.Sprintf("%04x/%d", t, l))
+			off += 4 + (l+3)&^3
+		}
+		detalhe = strings.Join(tipos, " ")
+	} else {
+		if len(data) == 0 {
+			return
+		}
+		key = fmt.Sprintf("%s %02x", kind, data[0])
+		n := len(data)
+		if n > 24 {
+			n = 24
+		}
+		detalhe = hex.EncodeToString(data[:n])
+	}
+	m.mu.Lock()
+	if m.relayOther == nil {
+		m.relayOther = map[string]int{}
+	}
+	m.relayOther[key]++
+	c := m.relayOther[key]
+	m.mu.Unlock()
+	if c <= 3 || c%1000 == 0 {
+		m.log.Info("relay: mensagem que não é mídia do celular", "tipo", key, "n", c, "bytes", len(data), "detalhe", detalhe)
 	}
 }
 
