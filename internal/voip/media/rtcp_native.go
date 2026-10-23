@@ -11,9 +11,19 @@ import "encoding/binary"
 // O SR que o celular nos manda tem 76 B (28 + 24 + 24): o mesmo formato.
 
 // WhatsappReceptionExt monta os 24 B da extensão do bloco de recepção.
+//
+// w1: o celular manda 106000..149491 nos SR dele, o MESMO valor no bloco do áudio e
+// no do vídeo (produção, 23/10/2026). SUPOSIÇÃO: é a estimativa de banda de quem
+// recebe; o whatsapp-rust manda 0 (ver WhatsappReceptionExtW1).
 func WhatsappReceptionExt(bytesReceived, rateBps uint32) [24]byte {
+	return WhatsappReceptionExtW1(bytesReceived, 0, rateBps)
+}
+
+// WhatsappReceptionExtW1 é WhatsappReceptionExt com a palavra 1 preenchida.
+func WhatsappReceptionExtW1(bytesReceived, w1, rateBps uint32) [24]byte {
 	var e [24]byte
 	binary.BigEndian.PutUint32(e[0:4], bytesReceived)
+	binary.BigEndian.PutUint32(e[4:8], w1)
 	binary.BigEndian.PutUint32(e[20:24], rateBps)
 	return e
 }
