@@ -28,6 +28,10 @@ import (
 //	                                      cada 1,5 s com WACALLS_1A1_PRST_BPS (padrão 300000);
 //	WACALLS_1A1_PRST_SEGUIR (padrão DESLIGADO) repassa o PRST do celular ao navegador
 //	                                      ({"type":"bitrate","bps":N} no canal h264);
+//	WACALLS_1A1_SR_NATIVO (padrão DESLIGADO) SR no formato nativo do WhatsApp a cada 1,5 s,
+//	                                      no áudio e no vídeo: bloco de recepção + 24 B com
+//	                                      bytes recebidos e taxa em bit/s (whatsapp-rust,
+//	                                      PR #1761). Pede WACALLS_1A1_RX para o vídeo;
 //	WACALLS_1A1_NACK   (padrão ligado, com a leitura) reenvia os pacotes do nosso vídeo
 //	                                      que o celular pede por NACK (205/1);
 //	WACALLS_1A1_RR     (padrão DESLIGADO) Receiver Report (PT 201) com perda/jitter do áudio e
@@ -55,6 +59,8 @@ type rtcp1a1 struct {
 	prst     uint64 // WACALLS_1A1_PRST: bps anunciados (0 = desligado)
 	nack     bool   // WACALLS_1A1_NACK
 	seguir   bool   // WACALLS_1A1_PRST_SEGUIR
+	nativo   bool   // WACALLS_1A1_SR_NATIVO
+	peerLog  time.Time
 	dica     uint64 // último bps repassado ao navegador
 	prstLog  time.Time
 	prstSeen uint64
@@ -95,11 +101,12 @@ func (m *CallManager) setupRtcpLocked(callKey []byte, ourDeviceJid, peerDeviceJi
 	}
 	m.stopRtcpLocked()
 	m.audioRx = media.NewRtpRxStats(16000)
-	if !pli && !sr && !rr && !srSend && remb == 0 && prst == 0 {
+	nativo := core.EnvFlag("WACALLS_1A1_SR_NATIVO", false)
+	if !pli && !sr && !rr && !srSend && remb == 0 && prst == 0 && !nativo {
 		return
 	}
 	r := &rtcp1a1{tagLen: rtcpTagLen(), sr: sr, srSend: srSend, rr: rr, remb: remb, prst: prst,
-		nack: core.EnvFlag("WACALLS_1A1_NACK", true), seguir: core.EnvFlag("WACALLS_1A1_PRST_SEGUIR", false),
+		nack: core.EnvFlag("WACALLS_1A1_NACK", true), seguir: core.EnvFlag("WACALLS_1A1_PRST_SEGUIR", false), nativo: nativo,
 		seen: map[[2]uint8]bool{}}
 	profile := core.EnvFlag("WACALLS_1A1_RTCP_PROFILE_BIT", true)
 	var err error
@@ -122,7 +129,7 @@ func (m *CallManager) setupRtcpLocked(callKey []byte, ourDeviceJid, peerDeviceJi
 		return
 	}
 	m.rtcp = r
-	m.log.Info("srtcp 1:1 pronto", "pli", pli, "leitura", sr, "sr", srSend, "rr", rr, "remb_bps", remb, "prst_bps", prst, "nack", r.nack, "tag", r.tagLen, "profile_bit", profile)
+	m.log.Info("srtcp 1:1 pronto", "pli", pli, "leitura", sr, "sr", srSend, "rr", rr, "remb_bps", remb, "prst_bps", prst, "nack", r.nack, "sr_nativo", nativo, "tag", r.tagLen, "profile_bit", profile)
 }
 
 func (m *CallManager) rekeyRtcpRecvLocked(peerKey []byte, peerJid string) {
@@ -166,7 +173,7 @@ func (m *CallManager) RequestPeerKeyframe() { m.video.RequestKeyframe() }
 // startRtcpLoopLocked inicia o SR+SDES periódico (só com WACALLS_1A1_SRTCP).
 func (m *CallManager) startRtcpLoopLocked() {
 	r := m.rtcp
-	if r == nil || !(r.srSend || r.rr || r.remb > 0 || r.prst > 0) || r.stop != nil {
+	if r == nil || !(r.srSend || r.rr || r.remb > 0 || r.prst > 0 || r.nativo) || r.stop != nil {
 		return
 	}
 	stop := make(chan struct{})
@@ -193,6 +200,9 @@ func (m *CallManager) sendSenderReports(r *rtcp1a1, nowMs uint64) {
 	m.mu.Unlock()
 	if r.rr {
 		m.sendReceiverReports(r, arx, peerAudio, time.UnixMilli(int64(nowMs)))
+	}
+	if r.nativo {
+		m.sendNativeSenderReports(r, astats, arx, peerAudio, nowMs)
 	}
 	if r.remb > 0 && r.video != nil {
 		var ssrcs []uint32
@@ -232,6 +242,29 @@ func (m *CallManager) sendSenderReports(r *rtcp1a1, nowMs uint64) {
 		if vs := m.video.SenderStats(); vs.PacketsSent > 0 {
 			if pkt, err := r.video.SenderReport(vs, nowMs); err == nil {
 				m.relay.Broadcast(pkt)
+			}
+		}
+	}
+}
+
+// sendNativeSenderReports manda o SR nativo do WhatsApp no áudio e no vídeo, cada um
+// com o bloco de recepção (e a extensão de 24 B) do stream correspondente do celular.
+func (m *CallManager) sendNativeSenderReports(r *rtcp1a1, astats media.RtcpSenderStats, arx *media.RtpRxStats, peerAudio uint32, nowMs uint64) {
+	now := time.UnixMilli(int64(nowMs))
+	if r.audio != nil && arx != nil && peerAudio != 0 {
+		if block, ok := arx.Report(peerAudio, now); ok {
+			b, rate := arx.Native(now)
+			if pkt, err := r.audio.NativeSenderReport(astats, nowMs, block, media.WhatsappReceptionExt(b, rate)); err == nil {
+				m.relay.Broadcast(pkt)
+			}
+		}
+	}
+	if r.video != nil {
+		if _, block, ok := m.video.RxReport(now); ok {
+			if b, rate, ok := m.video.RxNative(now); ok {
+				if pkt, err := r.video.NativeSenderReport(m.video.SenderStats(), nowMs, block, media.WhatsappReceptionExt(b, rate)); err == nil {
+					m.relay.Broadcast(pkt)
+				}
 			}
 		}
 	}
@@ -300,6 +333,27 @@ func (m *CallManager) onRelayRtcp(data []byte) {
 		m.log.Info("srtcp 1:1: RTCP do celular autenticado", "tag", tag, "ssrc", ssrc)
 	}
 	m.logRtcpKinds(r, plain)
+	if recs := media.ParsePeerReceptions(plain); len(recs) > 0 {
+		r.mu.Lock()
+		logIt := time.Since(r.peerLog) >= 5*time.Second
+		if logIt {
+			r.peerLog = time.Now()
+		}
+		r.mu.Unlock()
+		if logIt {
+			vs := m.video.SenderStats()
+			m.mu.Lock()
+			as, selfAudio := m.audioStats, m.selfSsrc
+			m.mu.Unlock()
+			for _, pr := range recs {
+				m.log.Info("srtcp 1:1: o celular diz o que recebe de nós (SR dele)", "sobre_ssrc", pr.About,
+					"perda_frac", pr.FractionLost, "perda_total", pr.CumLost, "jitter", pr.Jitter, "ext", pr.HasExt,
+					"w0_bytes", pr.Ext[0], "w1", pr.Ext[1], "w2", pr.Ext[2], "w3", pr.Ext[3], "w4", pr.Ext[4], "w5_bps", pr.Ext[5],
+					"nossos_bytes_video", vs.OctetsSent, "nossos_bytes_audio", as.OctetsSent,
+					"nosso_ssrc_video", m.video.SelfSsrc(), "nosso_ssrc_audio", selfAudio)
+			}
+		}
+	}
 	for _, bps := range media.ParsePrst(plain) {
 		r.mu.Lock()
 		repassar := r.seguir && bps != r.dica

@@ -232,7 +232,7 @@ func (m *CallManager) handleAudioRelayData(data []byte) {
 		return
 	}
 	if audioRx != nil {
-		audioRx.Update(pkt.Header.SequenceNumber, pkt.Header.Timestamp, time.Now())
+		audioRx.UpdateWithPayload(pkt.Header.SequenceNumber, pkt.Header.Timestamp, time.Now(), len(pkt.Payload))
 	}
 	if len(pkt.Payload) == 0 {
 		return

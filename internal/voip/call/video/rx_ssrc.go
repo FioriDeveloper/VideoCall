@@ -185,6 +185,19 @@ func (p *Pipeline) candSummaryLocked() string {
 	return b.String()
 }
 
+// RxNative devolve bytes de payload recebidos e a taxa (bit/s) do vídeo do peer,
+// para a extensão do SR nativo (ok=false sem recepção robusta ou sem dados).
+func (p *Pipeline) RxNative(now time.Time) (bytesTotal, rateBps uint32, ok bool) {
+	p.mu.Lock()
+	st := p.rx.stats
+	p.mu.Unlock()
+	if st == nil {
+		return 0, 0, false
+	}
+	b, r := st.Native(now)
+	return b, r, true
+}
+
 // PeerSsrc devolve o SSRC de vídeo do peer travado (0 = nenhum ainda).
 func (p *Pipeline) PeerSsrc() uint32 {
 	p.mu.Lock()

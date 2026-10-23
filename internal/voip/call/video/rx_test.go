@@ -158,7 +158,11 @@ func TestRxRelocksWhenLockedSsrcGoesSilent(t *testing.T) {
 	}
 
 	// Outro fluxo começa enquanto o 77 ainda fala: descartado (mas guardado).
-	other := &rxHarness{t: t, tx: h.tx, rtp: media.NewH264Session(88)}
+	// Cada fluxo tem o seu cifrador (como cada aparelho): com um só, a sequência
+	// aleatória do 2º fluxo podia virar o ROC de envio e o teste falhava às vezes.
+	km := core.SrtpKeyingMaterial{MasterKey: make([]byte, 16), MasterSalt: make([]byte, 14)}
+	otx, _ := media.NewSrtpSession(km, km, 4, 4)
+	other := &rxHarness{t: t, tx: otx, rtp: media.NewH264Session(88)}
 	h.feed(other.au(5, 300)...)
 	if h.nFrames() != 1 || h.p.rx.Foreign == 0 {
 		t.Fatalf("fluxo 88 com 77 ativo devia ser descartado: frames=%d foreign=%d", h.nFrames(), h.p.rx.Foreign)
@@ -293,4 +297,26 @@ func (h *rxHarness) countFrames() (good, bad int) {
 		}
 	}
 	return
+}
+
+func TestId5Modes(t *testing.T) {
+	old := id5ModeVal
+	defer func() { id5ModeVal = old }()
+	id5ModeVal = ""
+	if id5Value() != 0 {
+		t.Fatal("padrão deve ser 0")
+	}
+	id5ModeVal = "1234"
+	if id5Value() != 1234 {
+		t.Fatal("valor fixo")
+	}
+	id5ModeVal = "espelho"
+	id5Mirror.Store(777)
+	if id5Value() != 777 {
+		t.Fatal("espelho")
+	}
+	ext := buildWhatsappVideoExt(videoMediaFrameDelta, nil, 1)
+	if ext[2] != 0x51 || ext[3] != 0x03 || ext[4] != 0x09 {
+		t.Fatalf("id5 na extensão: %x", ext)
+	}
 }

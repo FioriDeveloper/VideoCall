@@ -30,6 +30,11 @@ type RtpRxStats struct {
 
 	lastSR   uint32
 	lastSRAt time.Time
+
+	// Para a extensão de 24 B do bloco de recepção do WhatsApp (ver rtcp_native.go).
+	payloadBytes  uint32
+	rateBytesMark uint32
+	rateAt        time.Time
 }
 
 // NewRtpRxStats cria o acumulador para um stream com a taxa de relógio dada (Hz).
@@ -37,11 +42,17 @@ func NewRtpRxStats(clockRate uint32) *RtpRxStats { return &RtpRxStats{clockRate:
 
 // Update registra a chegada de um pacote (não duplicado).
 func (s *RtpRxStats) Update(seq uint16, ts uint32, arrival time.Time) {
+	s.UpdateWithPayload(seq, ts, arrival, 0)
+}
+
+// UpdateWithPayload registra a chegada e soma os bytes de payload (só os únicos).
+func (s *RtpRxStats) UpdateWithPayload(seq uint16, ts uint32, arrival time.Time, payload int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.seen[seq%1024] == int32(seq)+1 {
 		return
 	}
+	s.payloadBytes += uint32(payload)
 	s.seen[seq%1024] = int32(seq) + 1
 	if !s.init {
 		s.init, s.baseSeq, s.maxSeq = true, seq, seq
@@ -70,6 +81,20 @@ func (s *RtpRxStats) NoteSenderReport(ntpMid uint32, at time.Time) {
 	s.mu.Lock()
 	s.lastSR, s.lastSRAt = ntpMid, at
 	s.mu.Unlock()
+}
+
+// Native devolve os bytes de payload recebidos (total) e a taxa de recepção em bit/s
+// desde a chamada anterior (0 na primeira), para a extensão do bloco do WhatsApp.
+func (s *RtpRxStats) Native(now time.Time) (bytesTotal, rateBps uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.rateAt.IsZero() {
+		if ms := now.Sub(s.rateAt).Milliseconds(); ms > 0 {
+			rateBps = uint32(uint64(s.payloadBytes-s.rateBytesMark) * 8 * 1000 / uint64(ms))
+		}
+	}
+	s.rateBytesMark, s.rateAt = s.payloadBytes, now
+	return s.payloadBytes, rateBps
 }
 
 // Received devolve quantos pacotes únicos já chegaram.

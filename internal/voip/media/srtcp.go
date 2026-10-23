@@ -218,6 +218,14 @@ func (s *SrtcpSender) Remb(bitrate uint64, ssrcs []uint32) ([]byte, error) {
 	return s.protectLocked(BuildRemb(s.ssrc, bitrate, ssrcs))
 }
 
+// NativeSenderReport monta e protege o SR nativo do WhatsApp (bloco + extensão de
+// 24 B, ver rtcp_native.go) com o SDES.
+func (s *SrtcpSender) NativeSenderReport(stats RtcpSenderStats, nowMs uint64, block, ext [24]byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.protectLocked(BuildWhatsappSenderReport(s.ssrc, &stats, nowMs, block, ext, &s.cname, s.profile))
+}
+
 // Prst monta e protege um PRST (feedback de banda próprio do WhatsApp; ver rtcp_wa.go).
 func (s *SrtcpSender) Prst(bps uint64) ([]byte, error) {
 	s.mu.Lock()

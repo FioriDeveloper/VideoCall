@@ -277,7 +277,7 @@ func (p *Pipeline) flushReorder(r *transport.RtpReorderer[*media.RtpPacket]) {
 
 func (p *Pipeline) noteReceptionLocked(pkt *media.RtpPacket, now time.Time) {
 	if p.rx.stats != nil {
-		p.rx.stats.Update(pkt.Header.SequenceNumber, pkt.Header.Timestamp, now)
+		p.rx.stats.UpdateWithPayload(pkt.Header.SequenceNumber, pkt.Header.Timestamp, now, len(pkt.Payload))
 	}
 }
 

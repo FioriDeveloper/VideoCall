@@ -54,6 +54,8 @@ type Pipeline struct {
 	sent     map[uint16][]byte
 	sentRing []uint16
 
+	rxExt rxExtStats // campos da extensão do vídeo do celular (ext_bw.go)
+
 	stats media.RtcpSenderStats // contadores de envio (p/ Sender Report SRTCP)
 
 	lastOrientation int // última orientação (0..3) vista na extensão RTP do peer; -1 = nenhuma
@@ -207,7 +209,8 @@ func buildWhatsappVideoExt(mediaFrameInfo uint8, frameNumber *uint16, transportS
 	} else {
 		ext = append(ext, 0x30, mediaFrameInfo) // id3, len1
 	}
-	ext = append(ext, 0x51, 0x00, 0x00)                                // id5 InitialBandwidth=0
+	bw := id5Value()
+	ext = append(ext, 0x51, byte(bw>>8), byte(bw))                     // id5 InitialBandwidth (ver id5Value)
 	ext = append(ext, 0x61, 0x00, 0x00)                                // id6 ShortOffset=0
 	ext = append(ext, 0x91, byte(transportSeq>>8), byte(transportSeq)) // id9 TransportSequence
 	for len(ext)%4 != 0 {
@@ -481,6 +484,7 @@ func (p *Pipeline) dispatch(d deliveries) {
 // consumeLocked despacota um pacote já decifrado e, no marker, fecha o access unit.
 func (p *Pipeline) consumeLocked(pkt *media.RtpPacket, d *deliveries) {
 	nalus := p.depack.Depacketize(pkt.Payload)
+	p.noteRxExt(pkt.Header)
 	if orient, ok := parseVideoOrientation(pkt.Header); ok && orient != p.lastOrientation {
 		p.lastOrientation = orient
 		d.orient, d.orientCb = orient, p.OnOrientation
