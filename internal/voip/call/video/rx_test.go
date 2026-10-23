@@ -325,17 +325,98 @@ func TestId5Modes(t *testing.T) {
 	}
 }
 
-func TestFastRRElement(t *testing.T) {
-	old := fastRRBps
-	defer func() { fastRRBps = old }()
-	fastRRBps = func() uint32 { return 149491 } // o valor que o celular mandou
-	ext := buildWhatsappVideoExt(videoMediaFrameDelta, nil, 1)
-	want := []byte{0xD3, 0x01, 0x02, 0x47, 0xf3}
-	if !bytes.Contains(ext, want) || len(ext)%4 != 0 {
-		t.Fatalf("id13 fast RR ausente ou extensão sem alinhamento: %x", ext)
+// parseOneByteExt lê a extensão como o parser do celular (one-byte headers:
+// id = alto, tamanho = baixo+1; byte 0 é padding; elemento além do fim = erro).
+func parseOneByteExt(t *testing.T, ext []byte) (ids []byte, vals [][]byte) {
+	t.Helper()
+	for off := 0; off < len(ext); {
+		h := ext[off]
+		off++
+		if h == 0 {
+			continue
+		}
+		id, l := h>>4, int(h&0x0f)+1
+		if off+l > len(ext) {
+			t.Fatalf("elemento id%d de %d B passa do fim (bad length): %x", id, l, ext)
+		}
+		ids = append(ids, id)
+		vals = append(vals, ext[off:off+l])
+		off += l
 	}
-	fastRRBps = func() uint32 { return 0 }
-	if bytes.Contains(buildWhatsappVideoExt(videoMediaFrameDelta, nil, 1), []byte{0xD3}) {
-		t.Fatal("desligado não pode mandar id13")
+	return
+}
+
+func TestFastRRElementLikePhone(t *testing.T) {
+	// Os bytes que o celular manda: 09 0247f3 00019e10 03.
+	if got := fastRRElement(149491, 106000); !bytes.Equal(got, []byte{0xD8, 0x09, 0x02, 0x47, 0xf3, 0x00, 0x01, 0x9e, 0x10, 0x03}) {
+		t.Fatalf("elemento %x", got)
+	}
+	for _, fn := range []*uint16{nil, new(uint16)} {
+		ext := buildWhatsappVideoExtFR(videoMediaFrameIDR, fn, 7, fastRRElement(1_500_000, 2_000_000))
+		if len(ext)%4 != 0 {
+			t.Fatalf("extensão sem alinhamento: %x", ext)
+		}
+		ids, vals := parseOneByteExt(t, ext)
+		if ids[len(ids)-1] != 13 || len(vals[len(vals)-1]) != 9 || vals[len(vals)-1][0] != 0x09 {
+			t.Fatalf("id13 errado: ids %v vals %x", ids, vals)
+		}
+		// o pacote inteiro: a extensão volta igual depois de codificar o cabeçalho
+		pkt := media.NewH264Session(1).CreatePacketWithDuration([]byte{0x65, 1}, 0, true)
+		pkt.Header.Extension, pkt.Header.ExtensionProfile, pkt.Header.ExtensionData = true, videoExtProfile, ext
+		hb := pkt.Header.HeaderBytes()
+		h2, err := media.DecodeRtpHeader(append(hb, pkt.Payload...))
+		if err != nil || !bytes.Equal(h2.ExtensionData, ext) || h2.ExtensionProfile != videoExtProfile {
+			t.Fatalf("cabeçalho não volta igual: %v", err)
+		}
+	}
+	if bytes.Contains(buildWhatsappVideoExt(videoMediaFrameDelta, nil, 1), []byte{0xD8}) {
+		t.Fatal("sem fast RR não pode ter id13")
 	}
 }
+
+// O id13 sai em no máximo 1 pacote por segundo, no 1º pacote do quadro.
+func TestFastRROncePerSecond(t *testing.T) {
+	old := fastRRBps
+	defer func() { fastRRBps = old }()
+	fastRRBps = func() uint32 { return 1_500_000 }
+	rel := &capRelay{connected: true}
+	p := New(nil, rel)
+	km := core.SrtpKeyingMaterial{MasterKey: make([]byte, 16), MasterSalt: make([]byte, 14)}
+	if err := p.Setup("c", "a@s.whatsapp.net", "b@s.whatsapp.net", km, km); err != nil {
+		t.Fatal(err)
+	}
+	au := func(typ byte, n int) []byte {
+		return append([]byte{0, 0, 0, 1, 0x60 | typ}, make([]byte, n)...)
+	}
+	p.FeedCaptured(au(5, 2000)) // IDR em 3 pacotes
+	for i := 0; i < 5; i++ {
+		p.FeedCaptured(au(1, 300))
+	}
+	rx, _ := media.NewSrtpSession(km, km, 4, 4)
+	com := 0
+	for i, b := range rel.sent {
+		pkt, err := rx.Unprotect(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(pkt.Header.ExtensionData, []byte{0xD8, 0x09}) {
+			com++
+			if i != 0 {
+				t.Fatalf("id13 fora do 1º pacote do 1º quadro (pacote %d)", i)
+			}
+		}
+	}
+	if com != 1 {
+		t.Fatalf("id13 em %d pacotes, esperado 1 (1 por segundo); pacotes %d", com, len(rel.sent))
+	}
+}
+
+type capRelay struct {
+	connected bool
+	sent      [][]byte
+}
+
+func (r *capRelay) Broadcast(b []byte)                 { r.sent = append(r.sent, append([]byte(nil), b...)) }
+func (r *capRelay) BufferedAmount() uint64             { return 0 }
+func (r *capRelay) HasConnection() bool                { return r.connected }
+func (r *capRelay) SetStreamSsrcs(self, peer []uint32) {}

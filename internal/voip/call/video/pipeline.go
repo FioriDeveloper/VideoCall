@@ -42,9 +42,10 @@ type Pipeline struct {
 	lastAUAt time.Time
 
 	// Estado da extensão de vídeo do WhatsApp (perfil 0xDEBE) no envio.
-	frameNumber      uint16 // nº do frame (por access unit), começa em 1
-	transportSeq     uint16 // sequência transport (por pacote)
-	keyframeRequired bool   // o primeiro frame enviado precisa ser IDR
+	frameNumber      uint16    // nº do frame (por access unit), começa em 1
+	transportSeq     uint16    // sequência transport (por pacote)
+	keyframeRequired bool      // o primeiro frame enviado precisa ser IDR
+	lastFastRR       time.Time // último id13 fast RR enviado (1 por fastRRInterval)
 
 	txMu sync.Mutex // só o diagnóstico do envio (txDiag)
 	tx   txStats
@@ -203,7 +204,13 @@ const (
 // buildWhatsappVideoExt monta o bloco da extensão 0xDEBE (padded a múltiplo de 4).
 // frameNumber só entra no PRIMEIRO pacote de cada access unit (ptr não-nil).
 func buildWhatsappVideoExt(mediaFrameInfo uint8, frameNumber *uint16, transportSeq uint16) []byte {
-	ext := make([]byte, 0, 16)
+	return buildWhatsappVideoExtFR(mediaFrameInfo, frameNumber, transportSeq, nil)
+}
+
+// buildWhatsappVideoExtFR monta a extensão 0xDEBE; fastRR (já com o byte de
+// cabeçalho do elemento, ver fastRRElement) entra antes do padding.
+func buildWhatsappVideoExtFR(mediaFrameInfo uint8, frameNumber *uint16, transportSeq uint16, fastRR []byte) []byte {
+	ext := make([]byte, 0, 28)
 	if frameNumber != nil {
 		ext = append(ext, 0x32, mediaFrameInfo, byte(*frameNumber>>8), byte(*frameNumber)) // id3, len3
 	} else {
@@ -213,12 +220,7 @@ func buildWhatsappVideoExt(mediaFrameInfo uint8, frameNumber *uint16, transportS
 	ext = append(ext, 0x51, byte(bw>>8), byte(bw))                     // id5 InitialBandwidth (ver id5Value)
 	ext = append(ext, 0x61, 0x00, 0x00)                                // id6 ShortOffset=0
 	ext = append(ext, 0x91, byte(transportSeq>>8), byte(transportSeq)) // id9 TransportSequence
-	if bps := fastRRBps(); bps > 0 {
-		// id13 "fast RR" (ver ext_bw.go): flags 0x01 = segue a estimativa de banda de
-		// quem recebe (rbe), 24 bits em bps. É o retorno que o celular usa para o
-		// envio dele quando fast_remb_in_video_rtp=1 (e o RTCP REMB está desligado).
-		ext = append(ext, 0xD3, 0x01, byte(bps>>16), byte(bps>>8), byte(bps))
-	}
+	ext = append(ext, fastRR...)
 	for len(ext)%4 != 0 {
 		ext = append(ext, 0x00) // padding até fronteira de 4 bytes
 	}
@@ -233,6 +235,11 @@ func (p *Pipeline) FeedCaptured(au []byte) {
 	tseq := p.transportSeq
 	first := p.lastAUAt.IsZero()
 	clock := p.clock
+	var fastRR []byte
+	if bps := fastRRBps(); bps > 0 && time.Since(p.lastFastRR) >= fastRRInterval {
+		fastRR = fastRRElement(bps, fastRRLinkCap(bps))
+		p.lastFastRR = time.Now()
+	}
 	p.mu.Unlock()
 	if rtp == nil || srtp == nil || len(au) == 0 {
 		return
@@ -317,7 +324,11 @@ func (p *Pipeline) FeedCaptured(au []byte) {
 		pkt := rtp.CreatePacketWithDuration(payload, 0, last)
 		pkt.Header.Extension = true
 		pkt.Header.ExtensionProfile = videoExtProfile
-		pkt.Header.ExtensionData = buildWhatsappVideoExt(mediaFrameInfo, fn, tseq)
+		var fr []byte
+		if i == 0 {
+			fr = fastRR // só no 1º pacote do quadro, no máximo 1 por segundo
+		}
+		pkt.Header.ExtensionData = buildWhatsappVideoExtFR(mediaFrameInfo, fn, tseq, fr)
 		tseq++
 		if protected, err := srtp.Protect(pkt); err == nil {
 			p.relay.Broadcast(protected)
