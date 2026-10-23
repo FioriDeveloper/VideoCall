@@ -103,9 +103,10 @@ func (p *Pipeline) noteCandLocked(ssrc uint32, payload []byte, now time.Time) *s
 // shouldLockLocked: o pacote é de um SSRC diferente do travado; trava nele?
 func (p *Pipeline) shouldLockLocked(c *ssrcCand, now time.Time) bool {
 	if p.rx.ssrc == 0 {
-		// 1º travamento: o 1º pacote com cara de H.264. Se for lixo que passou
-		// (~11%), a nota dele cai em poucos pacotes e o fluxo bom assume.
-		return c.hist&1 == 1
+		// 1º travamento: 2 pacotes seguidos com cara de H.264 (lixo passa em ~1%;
+		// com 1 só passava em ~11% e os quadros dele iam ao navegador). Os pacotes
+		// do fluxo bom ficam guardados (keep) e entram no travamento.
+		return c.hist&3 == 3
 	}
 	if !c.good() {
 		return false
@@ -114,7 +115,18 @@ func (p *Pipeline) shouldLockLocked(c *ssrcCand, now time.Time) bool {
 		return true
 	}
 	cur := p.rx.cands[p.rx.ssrc]
-	return cur != nil && cur.bad()
+	if cur == nil {
+		return false
+	}
+	// O travado tem menos da metade dos pacotes com cara de H.264 (o fluxo real do
+	// celular fica em 72..91%, medido; lixo em ~11%): troca já, sem esperar 8
+	// pacotes nem 1 s de silêncio (o lixo pode parar antes disso; a simulação
+	// perdia ~1 s de vídeo e entregava quadros de lixo, 1 vez em 10).
+	if cur.bad() || cur.n < 4 {
+		return cur.bad()
+	}
+	pc, pn := cur.valid*100/cur.n, c.valid*100/c.n
+	return pc < 50 || pn >= pc+30
 }
 
 // lockLocked trava (ou retrava) no SSRC: descarta o estado do fluxo anterior e

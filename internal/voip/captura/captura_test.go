@@ -5,12 +5,16 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestGravaFormatoENovoArquivoPorChamada(t *testing.T) {
 	old := dir
 	dir = t.TempDir()
-	defer func() { dir, f = old, nil }()
+	mu.Lock()
+	f, ult = nil, time.Time{} // estado de uma rodada anterior (-count>1)
+	mu.Unlock()
+	defer func() { dir, f, ult = old, nil, time.Time{} }()
 
 	Grava('a', []byte{0x80, 0x78}, []byte{1, 2, 3})
 	Grava('r', nil, []byte{9})

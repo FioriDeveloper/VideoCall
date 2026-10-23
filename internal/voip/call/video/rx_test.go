@@ -134,7 +134,9 @@ func TestRxGapDropsFrameUntilIDRAndRequestsPLI(t *testing.T) {
 
 func TestRxFiltersForeignSSRCAndPLIBeforeFirstIDR(t *testing.T) {
 	h := newRxHarness(t, 77)
-	h.feed(h.au(1, 800)...) // P antes de IDR: entregue (comportamento legado) mas pede PLI
+	// P antes de IDR (em 2 pacotes: o 1º travamento pede 2 seguidos com cara de
+	// H.264): entregue (comportamento legado), mas pede PLI.
+	h.feed(h.au(1, 1600)...)
 	if h.nPli() != 1 || h.plis[0] != 77 {
 		t.Fatalf("PLI esperado ao SSRC 77, got %v", h.plis)
 	}
@@ -152,7 +154,7 @@ func TestRxRelocksWhenLockedSsrcGoesSilent(t *testing.T) {
 	defer func() { ssrcSilenceRelock = old }()
 
 	h := newRxHarness(t, 77)
-	h.feed(h.au(5, 300)...)
+	h.feed(h.au(5, 1600)...) // 2+ pacotes: o 1º travamento pede 2 seguidos
 	if h.nFrames() != 1 {
 		t.Fatalf("1º IDR do SSRC 77: frames=%d", h.nFrames())
 	}
