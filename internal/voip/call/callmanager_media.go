@@ -231,10 +231,85 @@ func (m *CallManager) handleAudioRelayData(data []byte) {
 		}
 		return
 	}
+	fresh := true
 	if audioRx != nil {
-		audioRx.UpdateWithPayload(pkt.Header.SequenceNumber, pkt.Header.Timestamp, time.Now(), len(pkt.Payload))
+		fresh = audioRx.UpdateWithPayload(pkt.Header.SequenceNumber, pkt.Header.Timestamp, time.Now(), len(pkt.Payload))
 	}
 	if len(pkt.Payload) == 0 {
+		return
+	}
+	// O mesmo pacote chega pelos 2 relays, e fora de ordem (datachannel não
+	// ordenado). Antes, cada cópia era decodificada de novo (o MLow tem estado) e um
+	// pacote atrasado zerava a linha do tempo do áudio: trechos repetidos e cortes no
+	// áudio do contato. Agora a cópia e o atrasado (lugar já tocado) são descartados.
+	if audioDedupEnabled {
+		if !fresh {
+			m.audioDiag(func(d *audioRxDiag) { d.dups++ })
+			return
+		}
+	}
+	m.queuePeerAudio(pkt, codec, held)
+}
+
+// queuePeerAudio passa o pacote pela reordenação curta (WACALLS_1A1_AUDIO_REORDER_MS,
+// padrão 60): o datachannel do relay não é ordenado e o áudio do celular chega em
+// rajadas (jitter medido de 70 a 156 ms). Sem ela, um pacote fora de ordem virava
+// silêncio. Com 0, decodifica na hora (como antes).
+func (m *CallManager) queuePeerAudio(pkt *media.RtpPacket, codec media.Codec, held bool) {
+	if audioReorderWindow <= 0 {
+		m.playPeerAudio(pkt, codec, held)
+		return
+	}
+	m.audioReoMu.Lock()
+	defer m.audioReoMu.Unlock()
+	if m.audioReo == nil {
+		m.audioReo = transport.NewRtpReorderer[*media.RtpPacket](audioReorderWindow, 256)
+	}
+	now := time.Now()
+	for _, o := range m.audioReo.Push(pkt.Header.SequenceNumber, pkt, now) {
+		m.playPeerAudio(o.Item, codec, held)
+	}
+	m.armAudioFlushLocked(codec, held)
+}
+
+func (m *CallManager) armAudioFlushLocked(codec media.Codec, held bool) {
+	if m.audioReo == nil || m.audioReo.Pending() == 0 || m.audioReoTimer != nil {
+		return
+	}
+	wait := time.Until(m.audioReo.NextDeadline())
+	if wait < time.Millisecond {
+		wait = time.Millisecond
+	}
+	reo := m.audioReo
+	m.audioReoTimer = time.AfterFunc(wait, func() {
+		m.audioReoMu.Lock()
+		defer m.audioReoMu.Unlock()
+		m.audioReoTimer = nil
+		if m.audioReo != reo {
+			return
+		}
+		for _, o := range reo.Flush(time.Now()) {
+			m.playPeerAudio(o.Item, codec, held)
+		}
+		m.armAudioFlushLocked(codec, held)
+	})
+}
+
+// resetPeerAudioReorder descarta a fila de reordenação (nova chamada/relay).
+func (m *CallManager) resetPeerAudioReorder() {
+	m.audioReoMu.Lock()
+	if m.audioReoTimer != nil {
+		m.audioReoTimer.Stop()
+		m.audioReoTimer = nil
+	}
+	m.audioReo = nil
+	m.audioReoMu.Unlock()
+}
+
+// playPeerAudio decodifica e entrega ao navegador, em ordem.
+func (m *CallManager) playPeerAudio(pkt *media.RtpPacket, codec media.Codec, held bool) {
+	if audioDedupEnabled && m.isLatePeerAudio(pkt.Header.Timestamp) {
+		m.audioDiag(func(d *audioRxDiag) { d.late++ })
 		return
 	}
 	pcm, err := codec.Decode(pkt.Payload)
@@ -257,6 +332,63 @@ func (m *CallManager) handleAudioRelayData(data []byte) {
 	}
 }
 
+// audioDedupEnabled: WACALLS_1A1_AUDIO_DEDUP (padrão ligado).
+var audioDedupEnabled = core.EnvFlag("WACALLS_1A1_AUDIO_DEDUP", true)
+
+// audioReorderWindow: WACALLS_1A1_AUDIO_REORDER_MS (padrão 60; 0 desliga).
+var audioReorderWindow = func() time.Duration {
+	v := strings.TrimSpace(os.Getenv("WACALLS_1A1_AUDIO_REORDER_MS"))
+	if v == "" {
+		return 60 * time.Millisecond
+	}
+	n := 0
+	for _, c := range v {
+		if c < '0' || c > '9' {
+			return 60 * time.Millisecond
+		}
+		n = n*10 + int(c-'0')
+	}
+	return time.Duration(n) * time.Millisecond
+}()
+
+// isLatePeerAudio: o lugar deste pacote na linha do tempo já foi tocado.
+func (m *CallManager) isLatePeerAudio(ts uint32) bool {
+	const maxLateSamples = 8000
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.audioTimelineSet {
+		return false
+	}
+	d := int64(int32(ts-m.audioBaseTs)) - int64(m.audioPlayedSamples)
+	return d < 0 && d > -maxLateSamples
+}
+
+type audioRxDiag struct {
+	pkts, dups, late, padded uint64
+	since                    time.Time
+}
+
+func (m *CallManager) audioDiag(f func(*audioRxDiag)) {
+	m.mu.Lock()
+	m.audioDiagLocked(f)
+	m.mu.Unlock()
+}
+
+// audioDiagLocked conta e, a cada 10 s, registra a recepção do áudio do contato.
+func (m *CallManager) audioDiagLocked(f func(*audioRxDiag)) {
+	d := &m.audioRxD
+	f(d)
+	if d.since.IsZero() {
+		d.since = time.Now()
+		return
+	}
+	if time.Since(d.since) >= 10*time.Second {
+		m.log.Info("audio 1:1: recepção do contato (últimos 10 s)", "pacotes", d.pkts, "duplicados", d.dups,
+			"atrasados_descartados", d.late, "silencio_inserido_ms", d.padded/16, "dedup", audioDedupEnabled)
+		*d = audioRxDiag{since: time.Now()}
+	}
+}
+
 func (m *CallManager) alignPeerAudio(ts uint32, pcm []float32) []float32 {
 	const maxGapSamples = 8000
 	m.mu.Lock()
@@ -276,10 +408,12 @@ func (m *CallManager) alignPeerAudio(ts uint32, pcm []float32) []float32 {
 		return pcm
 	}
 	if gap > 0 {
+		m.audioDiagLocked(func(d *audioRxDiag) { d.padded += uint64(gap) })
 		padded := make([]float32, int(gap)+int(origLen))
 		copy(padded[int(gap):], pcm)
 		pcm = padded
 	}
 	m.audioPlayedSamples = target + origLen
+	m.audioDiagLocked(func(d *audioRxDiag) { d.pkts++ })
 	return pcm
 }

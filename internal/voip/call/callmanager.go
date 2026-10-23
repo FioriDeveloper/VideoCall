@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 	callvideo "wacalls/internal/voip/call/video"
 	"wacalls/internal/voip/core"
 	"wacalls/internal/voip/media"
@@ -36,6 +37,12 @@ type CallManager struct {
 	rtcp       *rtcp1a1              // SRTCP do 1:1 (WACALLS_1A1_PLI / WACALLS_1A1_SRTCP); nil = desligado
 	audioStats media.RtcpSenderStats // contadores de envio do áudio (p/ Sender Report)
 	audioRx    *media.RtpRxStats     // perda/jitter do áudio do peer (p/ Receiver Report)
+	audioRxD   audioRxDiag           // diagnóstico da recepção do áudio do contato
+
+	// reordenação curta do áudio do contato (queuePeerAudio)
+	audioReoMu    sync.Mutex
+	audioReo      *transport.RtpReorderer[*media.RtpPacket]
+	audioReoTimer *time.Timer
 
 	firstPacketSent       bool
 	initialTransportSent  bool

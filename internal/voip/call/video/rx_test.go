@@ -194,7 +194,9 @@ func TestRxGarbageStreamLockedFirstIsReplaced(t *testing.T) {
 	h.p.rx.cands[55] = &ssrcCand{n: 1, hist: 1}
 	h.p.rx.lastLocked = time.Now()
 	h.p.mu.Unlock()
-	for i := 0; i < 12; i++ {
+	// O lixo passa como H.264 em ~11% dos pacotes: com poucos pacotes a nota dele
+	// às vezes não caía (o teste falhava às vezes). 30 deixa isso desprezível.
+	for i := 0; i < 30; i++ {
 		h.feed(g.au(1, 200)...)
 		h.feed(h.au(1, 200)...)
 	}

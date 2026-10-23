@@ -102,6 +102,7 @@ func (m *CallManager) cleanupMedia() {
 	m.audioStats = media.RtcpSenderStats{}
 	m.mu.Unlock()
 
+	m.resetPeerAudioReorder()
 	m.video.Reset()
 	m.relay.Cleanup()
 	if codec != nil {

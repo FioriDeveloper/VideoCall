@@ -46,11 +46,12 @@ func (s *RtpRxStats) Update(seq uint16, ts uint32, arrival time.Time) {
 }
 
 // UpdateWithPayload registra a chegada e soma os bytes de payload (só os únicos).
-func (s *RtpRxStats) UpdateWithPayload(seq uint16, ts uint32, arrival time.Time, payload int) {
+// Devolve false para um duplicado (o mesmo pacote pelos 2 relays).
+func (s *RtpRxStats) UpdateWithPayload(seq uint16, ts uint32, arrival time.Time, payload int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.seen[seq%1024] == int32(seq)+1 {
-		return
+		return false
 	}
 	s.payloadBytes += uint32(payload)
 	s.seen[seq%1024] = int32(seq) + 1
@@ -74,6 +75,7 @@ func (s *RtpRxStats) UpdateWithPayload(seq uint16, ts uint32, arrival time.Time,
 		s.jitter += (float64(d) - s.jitter) / 16
 	}
 	s.transit, s.haveTransit = transit, true
+	return true
 }
 
 // NoteSenderReport guarda o LSR do último SR do peer (p/ LSR/DLSR do próximo RR).
