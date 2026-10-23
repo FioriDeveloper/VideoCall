@@ -10,8 +10,10 @@ import "encoding/binary"
 //     perdidos do nosso vídeo, ex. 91cd0003 56d99331 e64ecb71 b25b000f;
 //   - PSFB (206) FMT 15 (sem o bit) com o identificador "PRST" no lugar de "REMB":
 //     8fce0006 2ff9b888 00000000 50525354 0008 0a04088080052000 0000, ou seja um
-//     tamanho de 16 bits e um protobuf {1: {1: 81920}, 4: 0}. SUPOSIÇÃO: o campo 1.1
-//     é a banda (bps) que o celular estima para receber o nosso vídeo.
+//     tamanho de 16 bits e um protobuf {1: {1: 81920}, 4: 0}. É wa.voip.PeerFeedback
+//     (motor VoIP do WhatsApp Web): o campo 1.1 é video_sender_stats.sender_bwe, a
+//     estimativa do PRÓPRIO envio do celular (81920/35000 = ele no mínimo), e não
+//     uma banda para o nosso envio. Mandar PRST nosso não ajuda.
 
 // ParseNacks devolve as sequências pedidas em NACKs (205/1, com ou sem o bit 0x10)
 // para o mediaSSRC.

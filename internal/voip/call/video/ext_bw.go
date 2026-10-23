@@ -25,6 +25,22 @@ import (
 // "espelho" = o maior id5 que o celular mandou nos últimos ~5 s (unidade igual à
 // dele, seja qual for).
 
+// fastRRBps: WACALLS_1A1_FAST_RR_BPS (0 = desligado). Elemento id13 da extensão
+// 0xDEBE do nosso vídeo, no formato "fast RR" que o celular manda no vídeo dele:
+// 1 B de flags (0x01 = rbe a seguir) + rbe em 24 bits (bps). Visto em produção
+// (23/10/2026): o celular manda id13=09 0247f3 ..., e 0x0247f3 = 149491 é
+// exatamente o w1 (rbe) dos SR dele. Fonte do formato: motor VoIP do WhatsApp
+// Web (wasm público), funções do "fast REMB"/"fast RR" no id 13. Sem o nosso,
+// o envio do celular fica sem estimativa do nosso lado e desce ao mínimo.
+var fastRRBps = func() func() uint32 {
+	n, err := strconv.ParseUint(strings.TrimSpace(os.Getenv("WACALLS_1A1_FAST_RR_BPS")), 10, 32)
+	if err != nil || n > 0xffffff {
+		return func() uint32 { return 0 }
+	}
+	v := uint32(n)
+	return func() uint32 { return v }
+}()
+
 var (
 	id5Mirror  atomic.Uint32 // maior id5 do celular na janela (espelho)
 	id5ModeVal = func() string { return strings.TrimSpace(os.Getenv("WACALLS_1A1_ID5")) }()

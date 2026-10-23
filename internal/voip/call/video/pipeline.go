@@ -213,6 +213,12 @@ func buildWhatsappVideoExt(mediaFrameInfo uint8, frameNumber *uint16, transportS
 	ext = append(ext, 0x51, byte(bw>>8), byte(bw))                     // id5 InitialBandwidth (ver id5Value)
 	ext = append(ext, 0x61, 0x00, 0x00)                                // id6 ShortOffset=0
 	ext = append(ext, 0x91, byte(transportSeq>>8), byte(transportSeq)) // id9 TransportSequence
+	if bps := fastRRBps(); bps > 0 {
+		// id13 "fast RR" (ver ext_bw.go): flags 0x01 = segue a estimativa de banda de
+		// quem recebe (rbe), 24 bits em bps. É o retorno que o celular usa para o
+		// envio dele quando fast_remb_in_video_rtp=1 (e o RTCP REMB está desligado).
+		ext = append(ext, 0xD3, 0x01, byte(bps>>16), byte(bps>>8), byte(bps))
+	}
 	for len(ext)%4 != 0 {
 		ext = append(ext, 0x00) // padding até fronteira de 4 bytes
 	}

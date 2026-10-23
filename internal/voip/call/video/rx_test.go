@@ -324,3 +324,18 @@ func TestId5Modes(t *testing.T) {
 		t.Fatalf("id5 na extensão: %x", ext)
 	}
 }
+
+func TestFastRRElement(t *testing.T) {
+	old := fastRRBps
+	defer func() { fastRRBps = old }()
+	fastRRBps = func() uint32 { return 149491 } // o valor que o celular mandou
+	ext := buildWhatsappVideoExt(videoMediaFrameDelta, nil, 1)
+	want := []byte{0xD3, 0x01, 0x02, 0x47, 0xf3}
+	if !bytes.Contains(ext, want) || len(ext)%4 != 0 {
+		t.Fatalf("id13 fast RR ausente ou extensão sem alinhamento: %x", ext)
+	}
+	fastRRBps = func() uint32 { return 0 }
+	if bytes.Contains(buildWhatsappVideoExt(videoMediaFrameDelta, nil, 1), []byte{0xD3}) {
+		t.Fatal("desligado não pode mandar id13")
+	}
+}
