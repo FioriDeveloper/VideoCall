@@ -4,6 +4,7 @@ import (
 	"os"
 	"time"
 
+	"wacalls/internal/voip/captura"
 	"wacalls/internal/voip/core"
 	"wacalls/internal/voip/media"
 	"wacalls/internal/voip/transport"
@@ -106,6 +107,9 @@ func (p *Pipeline) handleRobustLocked(data []byte, now time.Time) (d deliveries)
 	}
 	if len(pkt.Payload) == 0 {
 		return
+	}
+	if captura.Ligada() {
+		captura.Grava('v', pkt.Header.HeaderBytes(), pkt.Payload)
 	}
 	// Sem autenticação na recepção, um fluxo com outra chave (outro aparelho do
 	// contato) decifra lixo sem erro: quem decide é a cara de H.264 do payload.

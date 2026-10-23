@@ -142,3 +142,12 @@ func parseMlowTOC(b byte) mlowTOC {
 		LowRate: (b>>2)&1 != 0,
 	}
 }
+
+// MLowSubFrames diz quantos frames MLow de 60 ms vêm no payload (1 se não for
+// container 0x92). Para análise de captura.
+func MLowSubFrames(payload []byte) int {
+	if subs, ok := splitContainer(payload); ok {
+		return len(subs)
+	}
+	return 1
+}

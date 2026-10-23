@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"wacalls/internal/voip/captura"
 	"wacalls/internal/voip/core"
 	"wacalls/internal/voip/media"
 	"wacalls/internal/voip/transport"
@@ -230,6 +231,9 @@ func (m *CallManager) handleAudioRelayData(data []byte) {
 			}
 		}
 		return
+	}
+	if captura.Ligada() {
+		captura.Grava('a', pkt.Header.HeaderBytes(), pkt.Payload)
 	}
 	fresh := true
 	if audioRx != nil {

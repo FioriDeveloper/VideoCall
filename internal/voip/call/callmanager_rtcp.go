@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"wacalls/internal/voip/captura"
 	"wacalls/internal/voip/core"
 	"wacalls/internal/voip/media"
 )
@@ -342,6 +343,9 @@ func (m *CallManager) onRelayRtcp(data []byte) {
 			}
 		}
 		m.log.Info("srtcp 1:1: RTCP do celular autenticado", "tag", tag, "ssrc", ssrc)
+	}
+	if captura.Ligada() {
+		captura.Grava('r', nil, plain)
 	}
 	m.logRtcpKinds(r, plain)
 	if recs := media.ParsePeerReceptions(plain); len(recs) > 0 {

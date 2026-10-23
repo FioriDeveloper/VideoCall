@@ -38,6 +38,15 @@ func NewRtpHeader(payloadType uint8, seq uint16, ts, ssrc uint32) *RtpHeader {
 	}
 }
 
+// HeaderBytes devolve o cabeçalho RTP codificado (captura de diagnóstico).
+func (h *RtpHeader) HeaderBytes() []byte {
+	b := make([]byte, h.Size())
+	if _, err := h.Encode(b); err != nil {
+		return nil
+	}
+	return b
+}
+
 func (h *RtpHeader) Size() int {
 	s := rtpMinHeaderSize + int(h.CsrcCount)*4
 	if h.Extension {
