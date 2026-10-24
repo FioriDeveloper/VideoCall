@@ -42,6 +42,22 @@ var CapabilityGroupVideoOffer = capabilityGroupVideoOffer
 // preaccept com capability de vídeo e aceite de upgrade sem AV1. Lido a cada stanza.
 func SignalingAB() bool { return core.EnvFlag("WACALLS_1A1_SIGNALING_AB", false) }
 
+// capabilityVideoOfferOficial é a capability que o WhatsApp Desktop oficial manda no
+// offer de VÍDEO 1:1 (fonte: gravação do WhatsApp Desktop oficial, 24/10/2026, mesmo
+// celular de teste). Repare que NÃO usa o byte de mídia 0xfa nem o par f7/13 que
+// mandamos hoje: são os mesmos bytes da capability de grupo (f5...bb...53), e o
+// celular devolveu exatamente esses bytes no preaccept. Hipótese em teste: o servidor
+// escolhe o voip_settings (bwe_impl=5 no oficial x bwe_impl=8 + condicionais de baixa
+// qualidade no nosso) a partir do que o offer anuncia.
+var capabilityVideoOfferOficial = []byte{0x01, 0x05, 0xf5, 0x09, 0xe0, 0xbb, 0x53}
+
+// OfertaOficial liga o offer de vídeo 1:1 no formato exato do WhatsApp Desktop
+// oficial (WACALLS_1A1_OFERTA_OFICIAL, padrão desligado). Lido a cada offer.
+// Comparado item a item com a gravação de 24/10/2026, a ÚNICA diferença do nosso
+// offer de vídeo era a capability: os dois <audio> (8000, 16000), o <video>, o
+// <net medium=3>, o <encopt keygen=2> e a ordem dos filhos já eram iguais.
+func OfertaOficial() bool { return core.EnvFlag("WACALLS_1A1_OFERTA_OFICIAL", false) }
+
 func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, callKey []byte, peerJid types.JID, isVideo bool) (waBinary.Node, []types.JID, error) {
 	creator := sock.OwnLID()
 	if creator.IsEmpty() {
@@ -78,6 +94,10 @@ func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, 
 		// Formato atual do WhatsApp Web: enc "h.264" (com ponto), dec "H264" (maiúsc.),
 		// SEM o atributo legado "orientation". E capability de vídeo próprio.
 		capability = capabilityVideoOffer
+		if OfertaOficial() {
+			// Mesma capability do WhatsApp Desktop oficial (ver capabilityVideoOfferOficial).
+			capability = capabilityVideoOfferOficial
+		}
 		offerContent = append(offerContent, waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{
 			"enc": "h.264", "dec": "H264",
 			"screen_width": "1920", "screen_height": "1080", "device_orientation": "0",
