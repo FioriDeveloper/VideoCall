@@ -351,8 +351,14 @@ func (p *Pipeline) FeedCaptured(au []byte) {
 		t.sent++
 		t.pkts += uint64(len(payloads))
 		t.bytes += uint64(len(packed))
+		if n := uint64(len(packed)); n > t.maxAU {
+			t.maxAU = n
+		}
 		if idr {
 			t.idrSent++
+			if n := uint64(len(packed)); n > t.maxIDR {
+				t.maxIDR = n
+			}
 		}
 	})
 }
@@ -395,7 +401,7 @@ func (p *Pipeline) Retransmit(seqs []uint16) int {
 // keyframe sem parar e não havia como saber se os quadros saíam).
 type txStats struct {
 	in, idrIn, semRelay, esperaIdr, congest, congestIdr, sent, idrSent, pkts, bytes, maxBuf uint64
-	nackPedidos, reenviados                                                                 uint64
+	nackPedidos, reenviados, maxAU, maxIDR                                                  uint64
 	last                                                                                    time.Time
 }
 
@@ -420,7 +426,8 @@ func (p *Pipeline) txDiag(f func(*txStats)) {
 			"enviados", t.sent, "idr_enviados", t.idrSent, "pacotes", t.pkts, "kbps", t.bytes*8/5000,
 			"sem_relay", t.semRelay, "esperando_1o_idr", t.esperaIdr, "descartados_fila", t.congest,
 			"idr_descartados_fila", t.congestIdr, "fila_bytes_no_descarte", t.maxBuf,
-			"nack_pedidos", t.nackPedidos, "reenviados", t.reenviados)
+			"nack_pedidos", t.nackPedidos, "reenviados", t.reenviados,
+			"maior_quadro_bytes", t.maxAU, "maior_idr_bytes", t.maxIDR)
 	}
 }
 
