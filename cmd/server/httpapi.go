@@ -28,6 +28,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/sessions", s.handleSessionList)
 	mux.HandleFunc("POST /api/sessions", s.handleSessionCreate)
 	mux.HandleFunc("GET /api/sessions/{sid}/calls", s.handleSessionCalls)
+	mux.HandleFunc("GET /api/sessions/{sid}/calls/camera", s.handleCameraConfig)
 	mux.HandleFunc("GET /api/sessions/{sid}/restriction-status", s.handleRestrictionStatus)
 	mux.HandleFunc("DELETE /api/sessions/{sid}", s.handleSessionDelete)
 	mux.HandleFunc("POST /api/sessions/{sid}/logout", s.handleSessionLogout)
@@ -449,6 +450,22 @@ func (s *server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// http:…) — diagnóstico do WACALLS_PUBLIC_IP=auto.
 	if ip, src := publicIPInfo(); ip != "" {
 		cfg["publicIp"], cfg["publicIpSource"] = ip, src
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// handleCameraConfig devolve o perfil da câmera do atendente para o painel usar no
+// encoder (WACALLS_1A1_CAM_W, _H, _BPS, _FPS). Sem nada configurado devolve {} e o
+// painel fica no padrão dele. Serve para testar perfis sem publicar o painel: o
+// celular parou de aceitar o nosso vídeo em 240x180/80 kbps e 320x240, e não em
+// 160x120/50 kbps (produção, 24/10/2026); o limite ainda não é conhecido.
+func (s *server) handleCameraConfig(w http.ResponseWriter, r *http.Request) {
+	cfg := map[string]int{}
+	for chave, nome := range map[string]string{"width": "WACALLS_1A1_CAM_W", "height": "WACALLS_1A1_CAM_H",
+		"bitrate": "WACALLS_1A1_CAM_BPS", "fps": "WACALLS_1A1_CAM_FPS"} {
+		if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv(nome))); err == nil && n > 0 {
+			cfg[chave] = n
+		}
 	}
 	writeJSON(w, http.StatusOK, cfg)
 }

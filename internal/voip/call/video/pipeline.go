@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"wacalls/internal/voip/captura"
 	"wacalls/internal/voip/core"
 	"wacalls/internal/voip/media"
 	"wacalls/internal/voip/transport"
@@ -333,6 +334,14 @@ func (p *Pipeline) FeedCaptured(au []byte) {
 		if protected, err := srtp.Protect(pkt); err == nil {
 			p.relay.Broadcast(protected)
 			p.remember(pkt.Header.SequenceNumber, protected)
+			if captura.Ligada() {
+				pl := pkt.Payload
+				corpo := []byte{byte(len(pl) >> 8), byte(len(pl))}
+				if len(pl) >= 2 {
+					corpo = append(corpo, pl[0], pl[1])
+				}
+				captura.Grava('o', pkt.Header.HeaderBytes(), corpo)
+			}
 		}
 	}
 

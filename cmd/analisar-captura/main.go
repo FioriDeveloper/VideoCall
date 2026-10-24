@@ -73,7 +73,79 @@ func main() {
 	fmt.Printf("captura: %d registros, %.1f s\n\n", len(rs), rs[len(rs)-1].at.Sub(t0).Seconds())
 	audio(rs)
 	video(rs, t0)
+	enviado(rs, t0)
 	rtcp(rs, t0)
+}
+
+// enviado resume o vídeo que NÓS mandamos (registros 'o': cabeçalho RTP + tamanho
+// do payload u16 + 2 primeiros bytes): quadros, pacotes por quadro, tamanho,
+// passo do timestamp e onde estão os IDR, para comparar uma chamada em que o
+// celular aceita o nosso vídeo com uma em que ele para de aceitar.
+func enviado(rs []rec, t0 time.Time) {
+	type q struct {
+		at          time.Time
+		ts          uint32
+		pkts, bytes int
+		idr         bool
+	}
+	var qs []q
+	cur := q{}
+	n := 0
+	for _, r := range rs {
+		if r.tipo != 'o' {
+			continue
+		}
+		h, err := media.DecodeRtpHeader(r.raw)
+		if err != nil || len(r.raw) < h.Size()+2 {
+			continue
+		}
+		corpo := r.raw[h.Size():]
+		tam := int(corpo[0])<<8 | int(corpo[1])
+		n++
+		cur.pkts++
+		cur.bytes += tam
+		cur.ts = h.Timestamp
+		if len(corpo) >= 4 {
+			t := corpo[2] & 0x1f
+			if t == 5 || t == 7 || (t == 28 && corpo[3]&0x1f == 5) || (t == 28 && corpo[3]&0x1f == 7) {
+				cur.idr = true
+			}
+		}
+		if h.Marker {
+			cur.at = r.at
+			qs = append(qs, cur)
+			cur = q{}
+		}
+	}
+	if n == 0 {
+		fmt.Println("NOSSO VÍDEO: nada gravado (captura sem registros 'o')")
+		fmt.Println()
+		return
+	}
+	var tam, pk, passo []float64
+	idr := 0
+	for i, x := range qs {
+		tam = append(tam, float64(x.bytes))
+		pk = append(pk, float64(x.pkts))
+		if x.idr {
+			idr++
+		}
+		if i > 0 {
+			passo = append(passo, float64(x.ts-qs[i-1].ts))
+		}
+	}
+	fmt.Printf("NOSSO VÍDEO: %d pacotes, %d quadros, %d IDR\n", n, len(qs), idr)
+	fmt.Printf("  bytes por quadro: %s\n", resumo(tam))
+	fmt.Printf("  pacotes por quadro: %s\n", resumo(pk))
+	fmt.Printf("  passo do timestamp (90 kHz): %s\n", resumo(passo))
+	fmt.Print("  IDR em (s):")
+	for _, x := range qs {
+		if x.idr {
+			fmt.Printf(" %.1f(%dB)", x.at.Sub(t0).Seconds(), x.bytes)
+		}
+	}
+	fmt.Println()
+	fmt.Println()
 }
 
 // unicos devolve a primeira cópia de cada (ssrc, seq), na ordem de chegada, e conta
