@@ -308,6 +308,17 @@ func (p *Pipeline) NoteSenderReport(ssrc, ntpMid uint32, at time.Time) {
 	}
 }
 
+// NoteSenderReportAny registra o SR de vídeo do peer sem conferir o SSRC (o
+// celular manda o SR com um SSRC de RTCP diferente do da mídia).
+func (p *Pipeline) NoteSenderReportAny(ntpMid uint32, at time.Time) {
+	p.mu.Lock()
+	st := p.rx.stats
+	p.mu.Unlock()
+	if st != nil {
+		st.NoteSenderReport(ntpMid, at)
+	}
+}
+
 func envInt(name string) int {
 	n := 0
 	for _, c := range os.Getenv(name) {

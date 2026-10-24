@@ -193,6 +193,10 @@ func BuildReceiverReport(senderSsrc uint32, block [24]byte, profileExtension boo
 type SenderReportInfo struct {
 	SSRC   uint32
 	NtpMid uint32 // 32 bits do meio do NTP (LSR)
+	// Video: o SR veio com o bit de perfil 0x10 do WhatsApp (stream de vídeo; o de
+	// áudio vem sem). O celular manda os SR com um SSRC de RTCP que não é o SSRC da
+	// mídia, então é por aqui que se sabe de qual stream é o SR.
+	Video bool
 }
 
 // ParseSenderReports extrai os SR (PT 200) de um RTCP composto já decifrado.
@@ -210,6 +214,7 @@ func ParseSenderReports(data []byte) []SenderReportInfo {
 			out = append(out, SenderReportInfo{
 				SSRC:   binary.BigEndian.Uint32(data[off+4 : off+8]),
 				NtpMid: binary.BigEndian.Uint32(data[off+10 : off+14]),
+				Video:  data[off]&0x10 != 0,
 			})
 		}
 		off += l

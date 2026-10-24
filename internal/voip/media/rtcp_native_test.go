@@ -32,3 +32,14 @@ func TestWhatsappSenderReportStructure(t *testing.T) {
 		t.Fatalf("áudio sem o bit de perfil: %x %x", a[0], a[76])
 	}
 }
+
+func TestParseSenderReportsVideoBit(t *testing.T) {
+	var cname [WhatsappRtcpCnameLen]byte
+	var block [24]byte
+	v := BuildWhatsappSenderReport(7, nil, 1_000, block, WhatsappReceptionExt(0, 0), &cname, true)
+	a := BuildWhatsappSenderReport(8, nil, 1_000, block, WhatsappReceptionExt(0, 0), &cname, false)
+	rs := ParseSenderReports(append(append([]byte{}, v...), a...))
+	if len(rs) != 2 || !rs[0].Video || rs[0].SSRC != 7 || rs[1].Video || rs[1].SSRC != 8 {
+		t.Fatalf("SRs %+v", rs)
+	}
+}

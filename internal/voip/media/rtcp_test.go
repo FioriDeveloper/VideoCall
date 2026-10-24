@@ -190,3 +190,19 @@ func TestParseSenderReports(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+func TestRxStatsReportCarriesLsrAfterSenderReport(t *testing.T) {
+	s := NewRtpRxStats(90000)
+	now := time.Now()
+	s.Update(10, 1000, now)
+	s.NoteSenderReport(0xAABBCCDD, now)
+	b, ok := s.Report(1, now.Add(500*time.Millisecond))
+	if !ok {
+		t.Fatal("sem relatório")
+	}
+	lsr := uint32(b[16])<<24 | uint32(b[17])<<16 | uint32(b[18])<<8 | uint32(b[19])
+	dlsr := uint32(b[20])<<24 | uint32(b[21])<<16 | uint32(b[22])<<8 | uint32(b[23])
+	if lsr != 0xAABBCCDD || dlsr < 32000 || dlsr > 33600 {
+		t.Fatalf("LSR %x DLSR %d (esperado ~32768 = 0,5 s)", lsr, dlsr)
+	}
+}

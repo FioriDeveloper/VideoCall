@@ -408,13 +408,22 @@ func (m *CallManager) onRelayRtcp(data []byte) {
 				"bps", rb.Bitrate, "ssrcs", rb.Ssrcs, "sender", rb.Sender)
 		}
 	}
+	// LSR/DLSR dos nossos relatórios: o celular manda os SR com um SSRC de RTCP
+	// próprio (ex.: 666502595 com o vídeo em 3528257725), então a checagem pelo
+	// SSRC da mídia nunca casava e os nossos blocos saíam com LSR=DLSR=0 ("nunca
+	// recebi SR"): o celular ficava sem RTT, e o motor do WhatsApp trata a falta de
+	// RTT como congestionamento (no_initial_rtt) e entra no modo de baixa
+	// qualidade. Agora o stream sai do bit de perfil do SR (0x10 = vídeo).
 	for _, sr := range media.ParseSenderReports(plain) {
 		now := time.Now()
-		m.video.NoteSenderReport(sr.SSRC, sr.NtpMid, now)
+		if sr.Video {
+			m.video.NoteSenderReportAny(sr.NtpMid, now)
+			continue
+		}
 		m.mu.Lock()
-		arx, pa := m.audioRx, m.subscribedSsrcForLog()
+		arx := m.audioRx
 		m.mu.Unlock()
-		if arx != nil && sr.SSRC == pa {
+		if arx != nil {
 			arx.NoteSenderReport(sr.NtpMid, now)
 		}
 	}
