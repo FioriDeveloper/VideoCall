@@ -51,6 +51,7 @@ type PeerReception struct {
 	Sender, About   uint32
 	FractionLost    uint8
 	CumLost, Jitter uint32
+	HighSeq         uint32 // maior seq estendido recebido (o celular ainda vê os nossos pacotes?)
 	Ext             [6]uint32
 	HasExt          bool
 }
@@ -71,6 +72,7 @@ func ParsePeerReceptions(plain []byte) []PeerReception {
 				FractionLost: p[32],
 				CumLost:      uint32(p[33])<<16 | uint32(p[34])<<8 | uint32(p[35]),
 				Jitter:       binary.BigEndian.Uint32(p[40:44]),
+				HighSeq:      binary.BigEndian.Uint32(p[36:40]),
 			}
 			if l >= 76 {
 				r.HasExt = true

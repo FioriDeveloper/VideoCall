@@ -362,7 +362,7 @@ func (m *CallManager) onRelayRtcp(data []byte) {
 			m.mu.Unlock()
 			for _, pr := range recs {
 				m.log.Info("srtcp 1:1: o celular diz o que recebe de nós (SR dele)", "sobre_ssrc", pr.About,
-					"perda_frac", pr.FractionLost, "perda_total", pr.CumLost, "jitter", pr.Jitter, "ext", pr.HasExt,
+					"perda_frac", pr.FractionLost, "perda_total", pr.CumLost, "jitter", pr.Jitter, "maior_seq", pr.HighSeq, "ext", pr.HasExt,
 					"w0_bytes", pr.Ext[0], "w1", pr.Ext[1], "w2", pr.Ext[2], "w3", pr.Ext[3], "w4", pr.Ext[4], "w5_bps", pr.Ext[5],
 					"nossos_bytes_video", vs.OctetsSent, "nossos_bytes_audio", as.OctetsSent,
 					"nosso_ssrc_video", m.video.SelfSsrc(), "nosso_ssrc_audio", selfAudio)
